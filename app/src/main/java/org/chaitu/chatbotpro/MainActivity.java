@@ -1,11 +1,13 @@
 package org.chaitu.chatbotpro;
 
+import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import android.annotation.TargetApi;
 import android.content.Context;
 import android.net.ConnectivityManager;
 import android.net.Network;
-import android.net.NetworkInfo;
+import android.net.NetworkCapabilities;
+import android.net.NetworkRequest;
 import android.os.Build;
 import android.os.Bundle;
 import android.view.View;
@@ -19,11 +21,12 @@ import android.widget.ProgressBar;
 import android.widget.Toast;
 
 public class MainActivity extends AppCompatActivity {
+    private static final String TARGET_URL = "https://ai.chaitu.net";
+
     private WebView webView;
     private ProgressBar progressBar;
     private ConnectivityManager connectivityManager;
     private ConnectivityManager.NetworkCallback networkCallback;
-    private static final String TARGET_URL = "https://ai.chaitu.net";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -72,7 +75,9 @@ public class MainActivity extends AppCompatActivity {
         webView.setWebViewClient(new WebViewClient() {
             @TargetApi(Build.VERSION_CODES.M)
             @Override
-            public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+            public void onReceivedError(@NonNull WebView view,
+                                        @NonNull WebResourceRequest request,
+                                        @NonNull WebResourceError error) {
                 if (request.isForMainFrame()) {
                     handleWebViewError(error.getErrorCode(), error.getDescription().toString());
                 }
@@ -81,7 +86,10 @@ public class MainActivity extends AppCompatActivity {
 
             @SuppressWarnings("deprecation")
             @Override
-            public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
+            public void onReceivedError(WebView view,
+                                        int errorCode,
+                                        String description,
+                                        String failingUrl) {
                 handleWebViewError(errorCode, description);
                 super.onReceivedError(view, errorCode, description, failingUrl);
             }
@@ -96,9 +104,15 @@ public class MainActivity extends AppCompatActivity {
 
     private void setupNetworkCallback() {
         connectivityManager = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+
+        // Build request for any internet-capable network
+        NetworkRequest request = new NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .build();
+
         networkCallback = new ConnectivityManager.NetworkCallback() {
             @Override
-            public void onAvailable(Network network) {
+            public void onAvailable(@NonNull Network network) {
                 runOnUiThread(() -> {
                     String current = webView.getUrl();
                     if (current != null && current.startsWith("data:")) {
@@ -106,20 +120,36 @@ public class MainActivity extends AppCompatActivity {
                     }
                 });
             }
+
+            @Override
+            public void onLost(@NonNull Network network) {
+                runOnUiThread(this::handleNoInternetConnection);
+            }
+
+            private void handleNoInternetConnection() {
+                MainActivity.this.handleNoInternetConnection();
+            }
         };
-        connectivityManager.registerDefaultNetworkCallback(networkCallback);
+
+        connectivityManager.registerNetworkCallback(request, networkCallback);
     }
 
     private boolean isInternetAvailable() {
         if (connectivityManager == null) {
             connectivityManager = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
         }
-        NetworkInfo activeNetwork = connectivityManager.getActiveNetworkInfo();
-        return activeNetwork != null && activeNetwork.isConnected();
+        Network network = connectivityManager.getActiveNetwork();
+        if (network == null) {
+            return false;
+        }
+        NetworkCapabilities capabilities = connectivityManager.getNetworkCapabilities(network);
+        return capabilities != null &&
+                capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
     }
 
     private void handleWebViewError(int errorCode, String description) {
         progressBar.setVisibility(View.GONE);
+
         if (isNetworkError(errorCode) && !isInternetAvailable()) {
             handleNoInternetConnection();
         } else if (isNetworkError(errorCode)) {
@@ -146,6 +176,7 @@ public class MainActivity extends AppCompatActivity {
                 + "<p>Please check your connection.</p>"
                 + "<button class='retry-btn' onclick='Android.retry()'>Retry</button>"
                 + "</body></html>";
+
         webView.loadDataWithBaseURL(null, html, "text/html", "UTF-8", null);
         Toast.makeText(this, "No internet connection", Toast.LENGTH_LONG).show();
     }
@@ -159,6 +190,7 @@ public class MainActivity extends AppCompatActivity {
                 + "<p>Please try again later.</p>"
                 + "<button class='retry-btn' onclick='Android.retry()'>Retry</button>"
                 + "</body></html>";
+
         webView.loadDataWithBaseURL(null, html, "text/html", "UTF-8", null);
     }
 
@@ -171,6 +203,7 @@ public class MainActivity extends AppCompatActivity {
                 + "<p>Something went wrong.</p>"
                 + "<button class='retry-btn' onclick='Android.retry()'>Retry</button>"
                 + "</body></html>";
+
         webView.loadDataWithBaseURL(null, html, "text/html", "UTF-8", null);
     }
 
