@@ -27,8 +27,8 @@ Build the release APK:
 ./gradlew :app:assembleRelease
 ```
 
-For local testing, a debug build installs alongside the release under the
-application ID `org.chaitu.chatbotpro.debug`:
+For local testing, build the debug variant. It uses the same application ID,
+`org.chaitu.chatbotpro`, as the release build:
 
 ```sh
 ./gradlew :app:assembleDebug

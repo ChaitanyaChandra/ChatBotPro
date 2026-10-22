@@ -64,13 +64,6 @@ android {
     }
 }
 
-// Keep debug builds separate from the release install.
-androidComponents {
-    onVariants(selector().withBuildType("debug")) { variant ->
-        variant.applicationId.set("org.chaitu.chatbotpro.debug")
-        variant.manifestPlaceholders.put("appLabel", "ChatBotPro (debug)")
-    }
-}
 
 val sherpaOnnxSource by configurations.creating {
     isCanBeConsumed = false
