@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/bg_dialog_panel"
+    android:fitsSystemWindows="true"
+    android:orientation="vertical"
+    android:paddingHorizontal="14dp"
+    android:paddingTop="18dp"
+    android:paddingBottom="14dp">
+
+    <TextView
+        android:id="@+id/cameraCropTitle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:text="@string/camera_crop_title"
+        android:textColor="?attr/colorAssistantText"
+        android:textSize="20sp"
+        android:textStyle="bold" />
+
+    <org.chaitu.chatbotpro.CropImageView
+        android:id="@+id/cameraCropImageView"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_marginTop="14dp"
+        android:layout_weight="1"
+        android:background="@color/black" />
+
+    <TextView
+        android:id="@+id/cameraCropStatus"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:gravity="center"
+        android:text="@string/camera_crop_status"
+        android:textColor="?attr/colorStatusText"
+        android:textSize="14sp"
+        android:textStyle="bold" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:gravity="center"
+        android:orientation="horizontal">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/cameraCropRetakeButton"
+            style="@style/DialogSecondaryButton"
+            android:layout_width="wrap_content"
+            android:layout_height="48dp"
+            android:text="@string/camera_retake_photo" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/cameraCropBackButton"
+            style="@style/DialogSecondaryButton"
+            android:layout_width="wrap_content"
+            android:layout_height="48dp"
+            android:layout_marginStart="10dp"
+            android:text="@string/back" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/cameraCropUseButton"
+            style="@style/DialogPrimaryButton"
+            android:layout_width="wrap_content"
+            android:layout_height="48dp"
+            android:layout_marginStart="10dp"
+            android:text="@string/camera_use_crop" />
+    </LinearLayout>
+</LinearLayout>

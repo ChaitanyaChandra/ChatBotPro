@@ -1,0 +1,75 @@
+package org.chaitu.chatbotpro
+
+import java.util.UUID
+
+enum class ChatRole {
+    USER,
+    ASSISTANT
+}
+
+enum class ChatTurnContentType {
+    TEXT,
+    IMAGE,
+    ATTACHMENT
+}
+
+data class ChatTurn(
+    val id: String = UUID.randomUUID().toString(),
+    val role: ChatRole,
+    val text: String,
+    val displayText: String? = null,
+    val preResponseStatusText: String? = null,
+    val thinkingText: String? = null,
+    val thinkingDurationMillis: Long? = null,
+    val stopped: Boolean = false,
+    val renderAsMarkdown: Boolean = false,
+    val isStreaming: Boolean = false,
+    val contentType: ChatTurnContentType = ChatTurnContentType.TEXT,
+    val imagePath: String? = null,
+    val attachmentId: String? = null,
+    val attachmentName: String? = null,
+    val attachmentKind: AttachmentKind? = null,
+    val attachmentProcessingRoute: AttachmentProcessingRoute? = null,
+    val toolCalls: List<ExternalToolCall> = emptyList(),
+    val toolCallId: String? = null,
+    val toolName: String? = null,
+    val isToolResult: Boolean = false
+) {
+    val isUser: Boolean
+        get() = role == ChatRole.USER
+
+    val isImage: Boolean
+        get() = contentType == ChatTurnContentType.IMAGE
+
+    val isAttachment: Boolean
+        get() = contentType == ChatTurnContentType.ATTACHMENT
+
+    val transcriptText: String
+        get() = if (isImage || isAttachment) "" else displayText ?: text
+}
+
+fun ChatTurn.asModelMemoryTurn(): ChatTurn? {
+    if (isImage || isAttachment) {
+        return null
+    }
+
+    return copy(
+        displayText = null,
+        preResponseStatusText = null,
+        thinkingText = null,
+        thinkingDurationMillis = null,
+        stopped = false,
+        renderAsMarkdown = false,
+        isStreaming = false,
+        contentType = ChatTurnContentType.TEXT,
+        imagePath = null,
+        attachmentId = null,
+        attachmentName = null,
+        attachmentKind = null,
+        attachmentProcessingRoute = null
+    )
+}
+
+fun List<ChatTurn>.asModelMemoryTurns(): List<ChatTurn> {
+    return mapNotNull { it.asModelMemoryTurn() }
+}

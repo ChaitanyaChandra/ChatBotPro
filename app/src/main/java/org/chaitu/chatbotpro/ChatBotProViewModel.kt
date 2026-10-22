@@ -1,0 +1,19 @@
+package org.chaitu.chatbotpro
+
+import androidx.lifecycle.ViewModel
+
+class ChatBotProViewModel : ViewModel() {
+    var chatController: PersistentChatController? = null
+    var modelId: String? = null
+    var pendingModelLoadSnapshot: ActiveChatSnapshot? = null
+
+    override fun onCleared() {
+        if (!LanServerService.isRunning()) {
+            LanServerControllerRegistry.clearIf(chatController)
+            chatController?.close()
+        }
+        chatController = null
+        pendingModelLoadSnapshot = null
+        super.onCleared()
+    }
+}

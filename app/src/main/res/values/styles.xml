@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="ActionButton" parent="Widget.MaterialComponents.Button">
+        <item name="android:textStyle">bold</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:paddingLeft">18dp</item>
+        <item name="android:paddingRight">18dp</item>
+        <item name="android:paddingTop">8dp</item>
+        <item name="android:paddingBottom">8dp</item>
+        <item name="android:minWidth">92dp</item>
+        <item name="android:minHeight">56dp</item>
+        <item name="cornerRadius">18dp</item>
+        <item name="elevation">0dp</item>
+        <item name="android:textColor">#FFFFFF</item>
+    </style>
+
+    <style name="SendButton" parent="ActionButton">
+        <item name="android:minWidth">0dp</item>
+        <item name="android:paddingLeft">10dp</item>
+        <item name="android:paddingRight">10dp</item>
+        <item name="backgroundTint">?attr/colorSendFill</item>
+        <item name="rippleColor">?attr/colorSendStroke</item>
+        <item name="android:textColor">#FFFFFF</item>
+    </style>
+
+    <style name="StopButton" parent="ActionButton">
+        <item name="android:minWidth">0dp</item>
+        <item name="android:paddingLeft">10dp</item>
+        <item name="android:paddingRight">10dp</item>
+        <item name="backgroundTint">?attr/colorStopFill</item>
+        <item name="rippleColor">?attr/colorStopStroke</item>
+        <item name="android:textColor">#FFFFFF</item>
+    </style>
+
+    <style name="InputToolButton" parent="Widget.MaterialComponents.Button.OutlinedButton">
+        <item name="android:minWidth">0dp</item>
+        <item name="android:minHeight">0dp</item>
+        <item name="android:padding">7dp</item>
+        <item name="cornerRadius">10dp</item>
+        <item name="elevation">0dp</item>
+        <item name="backgroundTint">?attr/colorFrameBackground</item>
+        <item name="strokeWidth">0dp</item>
+        <item name="rippleColor">?attr/colorSendStroke</item>
+        <item name="iconTint">?attr/colorAssistantText</item>
+    </style>
+
+    <style name="DialogPrimaryButton" parent="SendButton">
+        <item name="android:minWidth">0dp</item>
+        <item name="android:minHeight">48dp</item>
+    </style>
+
+    <style name="DialogSecondaryButton" parent="ActionButton">
+        <item name="android:minWidth">0dp</item>
+        <item name="android:minHeight">48dp</item>
+        <item name="backgroundTint">?attr/colorFrameBackground</item>
+        <item name="strokeColor">?attr/colorSendStroke</item>
+        <item name="strokeWidth">1dp</item>
+        <item name="rippleColor">?attr/colorSendStroke</item>
+        <item name="android:textColor">?attr/colorAssistantText</item>
+    </style>
+
+    <style name="ModelItemActionButton" parent="Widget.MaterialComponents.Button">
+        <item name="android:minWidth">0dp</item>
+        <item name="android:minHeight">0dp</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textSize">12sp</item>
+        <item name="android:paddingLeft">6dp</item>
+        <item name="android:paddingRight">6dp</item>
+        <item name="android:paddingTop">0dp</item>
+        <item name="android:paddingBottom">0dp</item>
+        <item name="cornerRadius">10dp</item>
+        <item name="elevation">0dp</item>
+        <item name="backgroundTint">?attr/colorSendFill</item>
+        <item name="strokeColor">?attr/colorSendStroke</item>
+        <item name="strokeWidth">1dp</item>
+        <item name="android:textColor">@color/white</item>
+    </style>
+
+    <style name="ClearButton">
+        <item name="android:background">@drawable/btn_clear</item>
+        <item name="android:textColor">#FFFF00</item>
+        <item name="android:padding">6dp</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:textSize">12sp</item>
+    </style>
+
+    <style name="AppDialog" parent="ThemeOverlay.MaterialComponents.MaterialAlertDialog">
+        <item name="backgroundTint">?attr/colorFrameBackground</item>
+    </style>
+
+    <style name="AppSeekBar" parent="Widget.AppCompat.SeekBar">
+        <item name="android:thumbTint">?attr/colorSendFill</item>
+        <item name="android:progressTint">?attr/colorSendFill</item>
+        <item name="android:secondaryProgressTint">?attr/colorSendStroke</item>
+        <item name="android:progressBackgroundTint">?attr/colorSendStroke</item>
+        <item name="android:splitTrack">false</item>
+    </style>
+
+</resources>

@@ -1,0 +1,5105 @@
+package org.chaitu.chatbotpro
+
+import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.res.ColorStateList
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.ImageDecoder
+import android.graphics.Paint
+import android.graphics.Rect
+import android.graphics.drawable.ColorDrawable
+import android.media.MediaRecorder
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
+import android.text.Editable
+import android.text.TextWatcher
+import android.text.method.LinkMovementMethod
+import android.text.method.PasswordTransformationMethod
+import android.text.method.HideReturnsTransformationMethod
+import android.text.format.Formatter
+import android.text.util.Linkify
+import android.util.Log
+import android.util.TypedValue
+import android.view.Gravity
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
+import android.widget.Button
+import android.widget.CheckBox
+import android.widget.EditText
+import android.widget.HorizontalScrollView
+import android.widget.ImageButton
+import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.ProgressBar
+import android.widget.PopupMenu
+import android.widget.PopupWindow
+import android.widget.RadioGroup
+import android.widget.ScrollView
+import android.widget.SeekBar
+import android.widget.TextView
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
+import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.widget.AppCompatSpinner
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.Camera
+import androidx.camera.core.ImageCapture
+import androidx.camera.core.ImageCaptureException
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
+import androidx.core.content.ContextCompat
+import androidx.core.view.GravityCompat
+import androidx.drawerlayout.widget.DrawerLayout
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import androidx.recyclerview.widget.GridLayoutManager
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import com.google.android.material.appbar.MaterialToolbar
+import com.google.android.material.button.MaterialButton
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.FileOutputStream
+import java.io.IOException
+import java.util.Locale
+import kotlin.math.ceil
+import kotlin.math.max
+
+open class ChatBotProActivity : AppCompatActivity() {
+
+    companion object {
+        private const val TAG = "ChatBotProActivity"
+        private const val IMAGE_INPUT_MAX_DIMENSION = 1024
+        private const val IMAGE_INPUT_MIN_NORMALIZED_DIMENSION = 256
+        private const val IMAGE_INPUT_EXTREME_ASPECT_RATIO = 4f
+        private const val IMAGE_INPUT_JPEG_QUALITY = 90
+        private const val CAMERA_CROP_MAX_IMAGE_DIMENSION = 1600
+        private const val CAMERA_CROP_JPEG_QUALITY = 95
+        private const val SETTINGS_STATE_ORIGINAL_PREFIX = "settings_preview_original"
+        private const val SETTINGS_STATE_DRAFT_PREFIX = "settings_preview_draft"
+    }
+
+    private data class ModelDialogViews(
+        val dialog: AlertDialog,
+        val introView: TextView,
+        val listContainer: LinearLayout
+    )
+
+    private data class ComposerPrompt(
+        val modelText: String,
+        val displayText: String,
+        val imageFilePaths: List<String> = emptyList(),
+        val nativeAudioInputs: List<NativeAudioInput> = emptyList(),
+        val attachmentContext: AttachmentContext? = null,
+        val imageTurns: List<ChatTurn> = emptyList(),
+        val attachmentTurns: List<ChatTurn> = emptyList()
+    )
+
+    private data class ImagePreprocessingResult(
+        val text: String,
+        val tempFilePath: String?,
+        val directImageFilePath: String? = null
+    )
+
+    private data class ComposerDraft(
+        val typedText: String,
+        val typedTextWithoutVoice: String,
+        val voiceText: String?
+    )
+
+    private data class SettingsDialogPreviewState(
+        val originalSettings: AppSettings,
+        val draftSettings: AppSettings
+    ) {
+        fun previewThemeSettings(): AppSettings {
+            return originalSettings.copy(
+                accent = draftSettings.accent,
+                appearance = draftSettings.appearance
+            )
+        }
+    }
+
+    private enum class PendingImageStatus {
+        PENDING,
+        READING,
+        READY,
+        FAILED
+    }
+
+    private enum class ImageInputContextSource {
+        OCR,
+        GEMMA_DIRECT
+    }
+
+    private data class PendingImageInput(
+        val id: Long,
+        val savedImageId: String,
+        val savedImagePath: String,
+        val uri: Uri,
+        val source: OcrInput.Source,
+        val contextSource: ImageInputContextSource,
+        val status: PendingImageStatus = PendingImageStatus.PENDING,
+        val recognizedText: String? = null,
+        val errorMessage: String? = null,
+        val tempFilePath: String? = null,
+        val directImageFilePath: String? = null
+    )
+
+    private lateinit var settingsStore: AppSettingsStore
+    private lateinit var currentSettings: AppSettings
+    private var settingsDialogPreviewState: SettingsDialogPreviewState? = null
+    private var isRecreatingForSettingsPreview = false
+    private var reopenSettingsDialogOnStart = false
+    private lateinit var modelInstructionStore: ModelInstructionStore
+    private lateinit var modelRuntimeSettingsStore: ModelRuntimeSettingsStore
+    private lateinit var modelSelectionStore: ModelSelectionStore
+    private lateinit var modelFileResolver: ModelFileResolver
+    private lateinit var modelLoadRecoveryStore: ModelLoadRecoveryStore
+    private lateinit var modelLoadCoordinator: ModelLoadCoordinator
+    private lateinit var modelPreflightChecker: ModelPreflightChecker
+    private lateinit var modelFileValidator: ModelFileValidator
+    private lateinit var chatSessionStore: ChatSessionStore
+    private lateinit var savedImageStore: SavedImageStore
+    private lateinit var attachmentRepository: AttachmentRepository
+    private lateinit var attachmentWorkerCoordinator: AttachmentWorkerCoordinator
+    private lateinit var whisperModelStore: WhisperModelStore
+    private lateinit var retainedState: ChatBotProViewModel
+    private var currentModel: ModelDescriptor? = null
+    private var currentImageInputMode: ImageInputMode = ImageInputMode.OCR
+    private var chatController: PersistentChatController? = null
+    private var controllerStateJob: Job? = null
+    private var modelPreparationJob: Job? = null
+    private var modelDownloadStateJob: Job? = null
+    private var lastGemmaDirectImageInputAvailable: Boolean? = null
+    private var modelDialogViews: ModelDialogViews? = null
+    private var modelRecoveryDialog: AlertDialog? = null
+    private var modelPickerPopup: PopupWindow? = null
+    private lateinit var chatAdapter: ChatAdapter
+    private lateinit var drawerLayout: DrawerLayout
+    private lateinit var drawerChatsRecyclerView: RecyclerView
+    private lateinit var drawerChatsEmptyView: TextView
+    private lateinit var drawerSessionsAdapter: DrawerSessionsAdapter
+    private lateinit var chatRecyclerView: RecyclerView
+    private lateinit var inputEditText: EditText
+    private lateinit var toolbarSubtitleView: TextView
+    private lateinit var toolbarModelSelector: View
+    private lateinit var selectedModelLabel: TextView
+    private lateinit var thinkingToggleContainer: View
+    private lateinit var thinkingToggle: CheckBox
+    private lateinit var newChatButton: View
+    private lateinit var sendButton: Button
+    private lateinit var stopButton: Button
+    private lateinit var micInputButton: MaterialButton
+    private lateinit var attachmentButton: MaterialButton
+    private lateinit var galleryOcrButton: Button
+    private lateinit var cameraOcrButton: Button
+    private lateinit var pendingImageInputsScroll: HorizontalScrollView
+    private lateinit var pendingImageInputsContainer: LinearLayout
+    private lateinit var activeAttachmentContainer: LinearLayout
+    private lateinit var activeAttachmentText: TextView
+    private lateinit var activeAttachmentProgress: ProgressBar
+    private lateinit var activeAttachmentRetry: MaterialButton
+    private lateinit var activeAttachmentCancel: MaterialButton
+    private lateinit var activeAttachmentDetach: MaterialButton
+    private lateinit var statusView: TextView
+    private lateinit var transientMessageView: TextView
+    private var speechInput: SpeechInput? = null
+    private var ocrInput: OcrInput? = null
+    private var speechBasePromptText: String = ""
+    private var speechRecognizedText: String = ""
+    private var speechCommittedText: String = ""
+    private var speechPartialText: String = ""
+    private var pendingSpeechStart = false
+    private var pendingCameraOcrStart = false
+    private var cameraProvider: ProcessCameraProvider? = null
+    private var cameraImageCapture: ImageCapture? = null
+    private var cameraOcrDialog: AlertDialog? = null
+    private var cameraOcrStatusView: TextView? = null
+    private val pendingImageInputs = mutableListOf<PendingImageInput>()
+    private var nextPendingImageInputId = 1L
+    private var imagePreprocessingJob: Job? = null
+    private var attachmentImportJob: Job? = null
+    private var audioPreparationJob: Job? = null
+    private var activeAttachment: AttachmentDescriptor? = null
+    private var attachmentImportInProgress = false
+    private var confirmedAttachmentOperationKey: String? = null
+    private var activeAttachmentWork: AttachmentWorkRecord? = null
+    private var activeAttachmentWorkState: androidx.work.WorkInfo.State? = null
+    private var preparedGemmaAudio: SegmentedNativeAudio? = null
+    private var preparedGemmaAudioAttachmentId: String? = null
+    private var dictationRecorder: MediaRecorder? = null
+    private var dictationRecordingFile: File? = null
+    private var dictationRecordingDialog: AlertDialog? = null
+    private var dictationTranscriptionDialog: AlertDialog? = null
+    private var pendingDictationRecordingStart = false
+    private var dictationTranscriptionJob: Job? = null
+    private val dictationTimerHandler = Handler(Looper.getMainLooper())
+    private var dictationStartedAtMillis = 0L
+    private var dictationTimer: Runnable? = null
+    private var isImagePreprocessingForSend = false
+    private var autoScrollDuringGeneration = false
+    private var autoScrollPendingFinalUpdate = false
+    private var wasGenerating = false
+    private var modelOperationStatusMessage: String? = null
+    private var activeDownloadModelId: String? = null
+    private var activeDownloadModelName: String? = null
+    private var activeDownloadFileName: String? = null
+    private var activeDownloadBytes: Long = 0L
+    private var activeDownloadTotalBytes: Long? = null
+    private val hideTransientMessageRunnable = Runnable {
+        if (::transientMessageView.isInitialized) {
+            transientMessageView.visibility = View.GONE
+        }
+    }
+    private val chatAdapterObserver = object : RecyclerView.AdapterDataObserver() {
+        override fun onChanged() = scrollChatToBottomIfNeeded()
+
+        override fun onItemRangeInserted(positionStart: Int, itemCount: Int) = scrollChatToBottomIfNeeded()
+
+        override fun onItemRangeChanged(positionStart: Int, itemCount: Int) = scrollChatToBottomIfNeeded()
+
+        override fun onItemRangeChanged(positionStart: Int, itemCount: Int, payload: Any?) = scrollChatToBottomIfNeeded()
+    }
+
+    private val speechPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val shouldStart = pendingSpeechStart
+        pendingSpeechStart = false
+        if (granted && shouldStart) {
+            startSpeechInput()
+        } else if (!granted) {
+            showTransientMessage(getString(R.string.speech_permission_denied))
+        }
+    }
+
+    private val cameraPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val shouldStart = pendingCameraOcrStart
+        pendingCameraOcrStart = false
+        if (granted && shouldStart) {
+            showCameraOcrDialog()
+        } else if (!granted) {
+            showTransientMessage(getString(R.string.camera_permission_denied))
+        }
+    }
+
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) {
+        // The foreground service still runs if the user denies this. The permission only
+        // controls whether Android 13+ can show the progress notification in the drawer.
+    }
+
+    private val galleryImagePickerLauncher = registerForActivityResult(
+        ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        uri?.let { selectedImage ->
+            importAndAddPendingImage(selectedImage, OcrInput.Source.GALLERY)
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        settingsStore = AppSettingsStore(this)
+        settingsDialogPreviewState = restoreSettingsDialogPreviewState(savedInstanceState)
+        currentSettings = settingsDialogPreviewState?.previewThemeSettings() ?: settingsStore.load()
+        reopenSettingsDialogOnStart = settingsDialogPreviewState != null
+        modelInstructionStore = ModelInstructionStore(this)
+        modelRuntimeSettingsStore = ModelRuntimeSettingsStore(this)
+        modelSelectionStore = ModelSelectionStore(this)
+        modelFileResolver = ModelFileResolver(this)
+        ModelRegistry.loadCustomModels(this)
+        modelLoadRecoveryStore = ModelLoadRecoveryStore(this)
+        modelLoadCoordinator = ModelLoadCoordinator(modelLoadRecoveryStore.load())
+        modelPreflightChecker = ModelPreflightChecker(this, modelFileResolver)
+        modelFileValidator = ModelFileValidator(modelFileResolver)
+        chatSessionStore = ChatSessionStore(this)
+        savedImageStore = SavedImageStore(this)
+        attachmentRepository = AttachmentRepository(this)
+        attachmentWorkerCoordinator = AttachmentWorkerCoordinator(this)
+        whisperModelStore = WhisperModelStore(this)
+        setTheme(currentSettings.accent.styleFor(currentSettings.appearance))
+        super.onCreate(savedInstanceState)
+        retainedState = ViewModelProvider(this)[ChatBotProViewModel::class.java]
+        if (retainedState.chatController == null) {
+            modelLoadCoordinator.recoverInterrupted(System.currentTimeMillis())
+            persistModelLoadRecord()
+        }
+        setContentView(R.layout.activity_main)
+
+        val toolbar: MaterialToolbar = findViewById(R.id.topToolbar)
+        val toolbarMenuButton: View = findViewById(R.id.toolbarMenuButton)
+        drawerLayout = findViewById(R.id.drawerLayout)
+        drawerChatsRecyclerView = findViewById(R.id.drawerChatsRecyclerView)
+        drawerChatsEmptyView = findViewById(R.id.drawerChatsEmpty)
+        toolbarModelSelector = findViewById(R.id.modelSelector)
+        selectedModelLabel = findViewById(R.id.selectedModelLabel)
+        toolbarSubtitleView = findViewById(R.id.toolbarSubtitle)
+        thinkingToggleContainer = findViewById(R.id.thinkingToggleContainer)
+        thinkingToggle = findViewById(R.id.thinkingToggle)
+        newChatButton = findViewById(R.id.newChatButton)
+        inputEditText = findViewById(R.id.userInput)
+        sendButton = findViewById(R.id.sendButton)
+        stopButton = findViewById(R.id.stopButton)
+        micInputButton = findViewById(R.id.micInputButton)
+        attachmentButton = findViewById(R.id.attachmentButton)
+        galleryOcrButton = findViewById(R.id.galleryOcrButton)
+        cameraOcrButton = findViewById(R.id.cameraOcrButton)
+        pendingImageInputsScroll = findViewById(R.id.pendingImageInputsScroll)
+        pendingImageInputsContainer = findViewById(R.id.pendingImageInputsContainer)
+        activeAttachmentContainer = findViewById(R.id.activeAttachmentContainer)
+        activeAttachmentText = findViewById(R.id.activeAttachmentText)
+        activeAttachmentProgress = findViewById(R.id.activeAttachmentProgress)
+        activeAttachmentRetry = findViewById(R.id.activeAttachmentRetry)
+        activeAttachmentCancel = findViewById(R.id.activeAttachmentCancel)
+        activeAttachmentDetach = findViewById(R.id.activeAttachmentDetach)
+        statusView = findViewById(R.id.statusView)
+        transientMessageView = findViewById(R.id.transientMessageView)
+        chatRecyclerView = findViewById(R.id.chatRecyclerView)
+        speechInput = createSpeechInput()
+        ocrInput = createOcrInput()
+
+        setSupportActionBar(toolbar)
+        supportActionBar?.setDisplayShowTitleEnabled(false)
+        toolbarMenuButton.setOnClickListener {
+            refreshDrawerSessions()
+            drawerLayout.openDrawer(GravityCompat.START)
+        }
+        toolbarSubtitleView.text = getString(R.string.model_picker_empty_subtitle)
+        configureDrawer()
+
+        chatAdapter = ChatAdapter(
+            fontSizeSp = currentSettings.chatFontSizeSp,
+            onImageTurnSelected = { turn ->
+                turn.imagePath?.let(::openImageViewer)
+            },
+            onAttachmentTurnSelected = ::reactivateAttachmentTurn,
+            onReportResponse = { responseText ->
+                LegalDialogs.showReportResponse(
+                    this,
+                    currentModel?.displayName,
+                    currentVersionName(),
+                    responseText
+                )
+            }
+        )
+        chatRecyclerView.layoutManager = LinearLayoutManager(this)
+        chatRecyclerView.adapter = chatAdapter
+        chatRecyclerView.itemAnimator = null
+        chatAdapter.registerAdapterDataObserver(chatAdapterObserver)
+        applyTypography(statusView, sendButton, stopButton)
+        updateMicRecordingState(false)
+        chatRecyclerView.addOnScrollListener(object : RecyclerView.OnScrollListener() {
+            override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
+                super.onScrollStateChanged(recyclerView, newState)
+                if (newState == RecyclerView.SCROLL_STATE_DRAGGING && chatController?.state?.value?.isGenerating == true) {
+                    autoScrollDuringGeneration = false
+                    autoScrollPendingFinalUpdate = false
+                }
+            }
+        })
+
+        toolbarModelSelector.setOnClickListener {
+            showModelPickerPopup()
+        }
+
+        newChatButton.setOnClickListener {
+            startNewChatFromUi()
+        }
+
+        micInputButton.setOnClickListener {
+            showDictationRecordingDialog()
+        }
+
+        attachmentButton.setOnClickListener(::showAttachmentMenu)
+        activeAttachmentDetach.setOnClickListener { detachActiveAttachment() }
+        activeAttachmentRetry.setOnClickListener { retryActiveAttachment() }
+        activeAttachmentCancel.setOnClickListener { cancelActiveAttachmentWork() }
+
+        galleryOcrButton.setOnClickListener {
+            galleryImagePickerLauncher.launch(
+                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+            )
+        }
+
+        cameraOcrButton.setOnClickListener {
+            handleCameraOcrClick()
+        }
+
+        sendButton.setOnClickListener {
+            handleSendClick()
+        }
+
+        stopButton.setOnClickListener {
+            chatController?.cancelGeneration()
+        }
+
+        thinkingToggleContainer.setOnClickListener {
+            thinkingToggle.isChecked = !thinkingToggle.isChecked
+        }
+
+        thinkingToggle.setOnCheckedChangeListener { _, isChecked ->
+            chatController?.setThinkingEnabled(isChecked)
+        }
+
+        val restoredModel = retainedState.modelId?.let(ModelRegistry::findById)
+        currentModel = restoredModel ?: modelSelectionStore.loadSelectedModel()
+        currentImageInputMode = modelSelectionStore.loadSelectedImageInputMode()
+        ensureImageInputModeAllowedForCurrentModel()
+        updateImageInputButtonDescriptions()
+        updateModelSelectorLabel()
+
+        val retainedController = retainedState.chatController
+        if (retainedController != null && currentModel != null) {
+            chatController = retainedController
+            LanServerControllerRegistry.register(currentModel!!.id, retainedController)
+            toolbarSubtitleView.text = currentModel?.displayName ?: getString(R.string.model_picker_empty_subtitle)
+            thinkingToggle.isChecked = retainedController.isThinkingEnabled()
+            observeController(retainedController)
+            applyChatState(retainedController.state.value)
+        } else {
+            val startupModel = currentModel
+            val failedStartupLoad = startupModel?.let { model ->
+                modelLoadCoordinator.record?.takeIf {
+                    it.modelId == model.id && it.phase == ModelLoadPhase.FAILED
+                }
+            }
+            if (startupModel != null && failedStartupLoad != null) {
+                toolbarSubtitleView.text = startupModel.displayName
+                renderNoControllerState(
+                    failedStartupLoad.failureReason ?: getString(R.string.model_load_failed_generic),
+                    preserveTranscript = false
+                )
+            } else if (startupModel != null && modelFileResolver.isModelAvailable(startupModel)) {
+                requestModelLoad(startupModel, activeChatSnapshot = null)
+            } else {
+                if (startupModel != null) {
+                    currentModel = null
+                    retainedState.modelId = null
+                    modelSelectionStore.clearSelectedModel()
+                    updateModelSelectorLabel()
+                }
+                renderNoControllerState(
+                    getString(R.string.model_required_message),
+                    preserveTranscript = false
+                )
+                thinkingToggle.isChecked = false
+            }
+        }
+
+        observeModelDownloadState()
+        applyModelDownloadState(ModelDownloadStateStore.state.value)
+        refreshDrawerSessions()
+        reconnectActiveAttachmentWorkIfNeeded()
+
+        if (reopenSettingsDialogOnStart) {
+            chatRecyclerView.post {
+                reopenSettingsDialogOnStart = false
+                showSettingsDialog()
+            }
+        }
+
+        chatRecyclerView.post {
+            LegalDialogs.showConsentIfNeeded(this, LegalConsentStore(this))
+        }
+    }
+
+    override fun onStop() {
+        pendingDictationRecordingStart = false
+        discardDictationRecording()
+        super.onStop()
+    }
+
+    override fun onDestroy() {
+        if (::chatAdapter.isInitialized) {
+            chatAdapter.unregisterAdapterDataObserver(chatAdapterObserver)
+        }
+        if (::transientMessageView.isInitialized) {
+            transientMessageView.removeCallbacks(hideTransientMessageRunnable)
+        }
+        controllerStateJob?.cancel()
+        modelDownloadStateJob?.cancel()
+        imagePreprocessingJob?.cancel()
+        attachmentImportJob?.cancel()
+        audioPreparationJob?.cancel()
+        cleanupPreparedGemmaAudio()
+        dictationTranscriptionJob?.cancel()
+        dictationTranscriptionDialog?.dismiss()
+        discardDictationRecording()
+        isImagePreprocessingForSend = false
+        stopCameraOcr()
+        cameraOcrDialog?.dismiss()
+        speechInput?.destroy()
+        ocrInput?.close()
+        clearPendingImageInputs()
+        modelDialogViews?.dialog?.dismiss()
+        modelRecoveryDialog?.dismiss()
+        modelPickerPopup?.dismiss()
+        super.onDestroy()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        settingsDialogPreviewState?.let { previewState ->
+            saveAppSettings(outState, SETTINGS_STATE_ORIGINAL_PREFIX, previewState.originalSettings)
+            saveAppSettings(outState, SETTINGS_STATE_DRAFT_PREFIX, previewState.draftSettings)
+        }
+        super.onSaveInstanceState(outState)
+    }
+
+    private fun requireUsableController(): PersistentChatController? {
+        val controller = chatController
+        if (controller == null) {
+            showTransientMessage(getString(R.string.model_required_message))
+            showModelPickerPopup()
+            return null
+        }
+
+        if (!controller.state.value.isReady) {
+            showTransientMessage(getString(R.string.model_loading_message))
+            return null
+        }
+
+        return controller
+    }
+
+    private fun createSpeechInput(): SpeechInput {
+        return SpeechInput(
+            this,
+            object : SpeechInput.Listener {
+                override fun onSpeechStarted() {
+                    runOnUiThread {
+                        updateMicRecordingState(true)
+                        showTransientMessage(getString(R.string.speech_listening))
+                    }
+                }
+
+                override fun onSpeechPartial(text: String) {
+                    runOnUiThread {
+                        handleSpeechRecognizedText(text, final = false)
+                    }
+                }
+
+                override fun onSpeechFinal(text: String, confidenceScores: FloatArray?) {
+                    runOnUiThread {
+                        handleSpeechRecognizedText(text, final = true)
+                    }
+                }
+
+                override fun onSpeechError(message: String) {
+                    runOnUiThread {
+                        showTransientMessage(message)
+                    }
+                }
+
+                override fun onSpeechEnded() {
+                    runOnUiThread {
+                        updateMicRecordingState(false)
+                    }
+                }
+            }
+        )
+    }
+
+    private fun createOcrInput(): OcrInput {
+        return OcrInput(
+            this,
+            statusListener = { message -> runOnUiThread { showTransientMessage(message) } }
+        )
+    }
+
+    private fun handleSpeechInputClick() {
+        val speech = speechInput ?: return
+        if (speech.isRecording) {
+            speech.stop()
+            return
+        }
+
+        if (!hasPermission(Manifest.permission.RECORD_AUDIO)) {
+            pendingSpeechStart = true
+            speechPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            return
+        }
+
+        startSpeechInput()
+    }
+
+    private fun startSpeechInput() {
+        speechBasePromptText = inputEditText.text.toString()
+        speechRecognizedText = ""
+        speechCommittedText = ""
+        speechPartialText = ""
+        speechInput?.start()
+    }
+
+    private fun handleSpeechRecognizedText(text: String, final: Boolean) {
+        val recognizedText = PromptPreprocessor.normalize(text)
+        if (recognizedText.isBlank()) {
+            return
+        }
+
+        if (final) {
+            speechCommittedText = PromptPreprocessor.mergeTypedAndRecognized(
+                speechCommittedText,
+                recognizedText
+            )
+            speechPartialText = ""
+        } else {
+            speechPartialText = recognizedText
+        }
+
+        speechRecognizedText = PromptPreprocessor.mergeTypedAndRecognized(
+            speechCommittedText,
+            speechPartialText
+        )
+        setPromptInputText(
+            PromptPreprocessor.mergeTypedAndRecognized(
+                speechBasePromptText,
+                recognizedText
+            )
+        )
+    }
+
+    private fun handleCameraOcrClick() {
+        if (!hasPermission(Manifest.permission.CAMERA)) {
+            pendingCameraOcrStart = true
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+            return
+        }
+
+        showCameraOcrDialog()
+    }
+
+    private fun showCameraOcrDialog() {
+        if (cameraOcrDialog?.isShowing == true) {
+            return
+        }
+
+        val dialogBuilder = MaterialAlertDialogBuilder(this)
+        val dialogView = LayoutInflater.from(dialogBuilder.context)
+            .inflate(R.layout.dialog_camera_ocr, null)
+        val titleView: TextView = dialogView.findViewById(R.id.cameraOcrDialogTitle)
+        val previewView: PreviewView = dialogView.findViewById(R.id.cameraPreviewView)
+        val zoomLabelView: TextView = dialogView.findViewById(R.id.cameraZoomLabel)
+        val zoomSeekBar: SeekBar = dialogView.findViewById(R.id.cameraZoomSeekBar)
+        val statusText: TextView = dialogView.findViewById(R.id.cameraOcrStatus)
+        val cancelButton: Button = dialogView.findViewById(R.id.cameraOcrCancelButton)
+        val captureButton: Button = dialogView.findViewById(R.id.cameraOcrCaptureButton)
+
+        titleView.text = if (currentImageInputMode == ImageInputMode.OCR) {
+            getString(R.string.camera_ocr_title)
+        } else {
+            getString(R.string.camera_image_title)
+        }
+
+        val dialog = dialogBuilder
+            .setView(dialogView)
+            .create()
+
+        cameraOcrDialog = dialog
+        cameraOcrStatusView = statusText
+
+        cancelButton.setOnClickListener {
+            dialog.dismiss()
+        }
+
+        captureButton.setOnClickListener {
+            captureCameraOcrPhoto(dialog)
+        }
+
+        dialog.setOnDismissListener {
+            stopCameraOcr()
+            cameraOcrDialog = null
+            cameraOcrStatusView = null
+        }
+
+        showPanelDialog(dialog)
+        dialog.window?.setLayout(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        )
+        startCameraPreview(previewView, zoomSeekBar, zoomLabelView)
+    }
+
+    private fun startCameraPreview(
+        previewView: PreviewView,
+        zoomSeekBar: SeekBar,
+        zoomLabelView: TextView
+    ) {
+        cameraOcrStatusView?.text = getString(R.string.camera_ocr_status_starting)
+        val providerFuture = ProcessCameraProvider.getInstance(this)
+        providerFuture.addListener(
+            Runnable {
+                val provider = runCatching { providerFuture.get() }.getOrElse { error ->
+                    cameraOcrStatusView?.text = error.message ?: "Camera could not start."
+                    return@Runnable
+                }
+
+                if (cameraOcrDialog?.isShowing != true) {
+                    provider.unbindAll()
+                    return@Runnable
+                }
+
+                val preview = Preview.Builder()
+                    .build()
+                    .also { cameraPreview ->
+                        cameraPreview.setSurfaceProvider(previewView.surfaceProvider)
+                    }
+
+                val imageCapture = ImageCapture.Builder()
+                    .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                    .build()
+
+                runCatching {
+                    provider.unbindAll()
+                    val boundCamera = provider.bindToLifecycle(
+                        this,
+                        CameraSelector.DEFAULT_BACK_CAMERA,
+                        preview,
+                        imageCapture
+                    )
+                    cameraProvider = provider
+                    cameraImageCapture = imageCapture
+                    configureCameraZoomControls(boundCamera, zoomSeekBar, zoomLabelView)
+                    previewView.post {
+                        previewView.display?.rotation?.let { rotation ->
+                            cameraImageCapture?.targetRotation = rotation
+                        }
+                    }
+                    cameraOcrStatusView?.text = cameraReadyStatusText()
+                }.onFailure { error ->
+                    cameraOcrStatusView?.text = error.message ?: "Camera OCR could not start."
+                }
+            },
+            ContextCompat.getMainExecutor(this)
+        )
+    }
+
+    private fun configureCameraZoomControls(
+        boundCamera: Camera,
+        zoomSeekBar: SeekBar,
+        zoomLabelView: TextView
+    ) {
+        val zoomState = boundCamera.cameraInfo.zoomState.value
+        val minZoomRatio = zoomState?.minZoomRatio ?: 1f
+        val maxZoomRatio = zoomState?.maxZoomRatio ?: minZoomRatio
+        val hasZoom = maxZoomRatio > minZoomRatio + 0.01f
+
+        zoomSeekBar.max = 100
+        zoomSeekBar.progress = 0
+        zoomSeekBar.isEnabled = hasZoom
+        updateCameraZoomLabel(zoomLabelView, minZoomRatio)
+
+        zoomSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                if (!fromUser || !hasZoom) {
+                    return
+                }
+
+                val linearZoom = (progress / 100f).coerceIn(0f, 1f)
+                boundCamera.cameraControl.setLinearZoom(linearZoom)
+                updateCameraZoomLabel(
+                    zoomLabelView,
+                    minZoomRatio + ((maxZoomRatio - minZoomRatio) * linearZoom)
+                )
+            }
+
+            override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
+
+            override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
+        })
+    }
+
+    private fun updateCameraZoomLabel(labelView: TextView, zoomRatio: Float) {
+        labelView.text = getString(R.string.camera_zoom_label_format, zoomRatio.coerceAtLeast(1f))
+    }
+
+    private fun captureCameraOcrPhoto(dialog: AlertDialog) {
+        val imageCapture = cameraImageCapture ?: run {
+            showTransientMessage(getString(R.string.camera_ocr_status_starting))
+            return
+        }
+        val outputFile = createCameraOcrOutputFile()
+        val outputOptions = ImageCapture.OutputFileOptions.Builder(outputFile).build()
+        cameraOcrStatusView?.text = getString(R.string.camera_ocr_status_capturing)
+
+        imageCapture.takePicture(
+            outputOptions,
+            ContextCompat.getMainExecutor(this),
+            object : ImageCapture.OnImageSavedCallback {
+                override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
+                    dialog.dismiss()
+                    showCameraPhotoReviewDialog(outputFile)
+                }
+
+                override fun onError(exception: ImageCaptureException) {
+                    runCatching { outputFile.delete() }
+                    val message = exception.message ?: "Could not capture photo."
+                    cameraOcrStatusView?.text = message
+                    showTransientMessage(message)
+                }
+            }
+        )
+    }
+
+    private fun showCameraPhotoReviewDialog(photoFile: File) {
+        val reviewBitmap = runCatching { decodeBitmapForCameraCrop(photoFile) }.getOrElse { error ->
+            runCatching { photoFile.delete() }
+            val message = error.message ?: getString(R.string.image_input_file_error)
+            showTransientMessage(message)
+            return
+        }
+
+        val dialogBuilder = MaterialAlertDialogBuilder(this)
+        val dialogView = LayoutInflater.from(dialogBuilder.context)
+            .inflate(R.layout.dialog_camera_photo_review, null)
+        val previewImage: ImageView = dialogView.findViewById(R.id.cameraPhotoReviewImage)
+        val retakeButton: Button = dialogView.findViewById(R.id.cameraPhotoRetakeButton)
+        val cropButton: Button = dialogView.findViewById(R.id.cameraPhotoCropButton)
+        val useButton: Button = dialogView.findViewById(R.id.cameraPhotoUseButton)
+        previewImage.setImageBitmap(reviewBitmap)
+
+        val dialog = dialogBuilder
+            .setView(dialogView)
+            .create()
+        var handled = false
+
+        retakeButton.setOnClickListener {
+            handled = true
+            runCatching { photoFile.delete() }
+            dialog.dismiss()
+            showCameraOcrDialog()
+        }
+
+        cropButton.setOnClickListener {
+            handled = true
+            dialog.dismiss()
+            showCameraCropDialog(photoFile)
+        }
+
+        useButton.setOnClickListener {
+            handled = true
+            attachCameraPhoto(photoFile)
+            dialog.dismiss()
+        }
+
+        dialog.setOnDismissListener {
+            previewImage.setImageDrawable(null)
+            reviewBitmap.recycle()
+            if (!handled) {
+                runCatching { photoFile.delete() }
+            }
+        }
+
+        showPanelDialog(dialog)
+        dialog.window?.setLayout(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        )
+    }
+
+    private fun showCameraCropDialog(photoFile: File) {
+        val sourceBitmap = runCatching { decodeBitmapForCameraCrop(photoFile) }.getOrElse { error ->
+            runCatching { photoFile.delete() }
+            val message = error.message ?: getString(R.string.image_input_file_error)
+            showTransientMessage(message)
+            return
+        }
+
+        val dialogBuilder = MaterialAlertDialogBuilder(this)
+        val dialogView = LayoutInflater.from(dialogBuilder.context)
+            .inflate(R.layout.dialog_camera_crop, null)
+        val cropImageView: CropImageView = dialogView.findViewById(R.id.cameraCropImageView)
+        val statusView: TextView = dialogView.findViewById(R.id.cameraCropStatus)
+        val retakeButton: Button = dialogView.findViewById(R.id.cameraCropRetakeButton)
+        val backButton: Button = dialogView.findViewById(R.id.cameraCropBackButton)
+        val useButton: Button = dialogView.findViewById(R.id.cameraCropUseButton)
+        cropImageView.setImageBitmap(sourceBitmap)
+
+        val dialog = dialogBuilder
+            .setView(dialogView)
+            .create()
+        var handled = false
+
+        retakeButton.setOnClickListener {
+            handled = true
+            runCatching { photoFile.delete() }
+            dialog.dismiss()
+            showCameraOcrDialog()
+        }
+
+        backButton.setOnClickListener {
+            handled = true
+            dialog.dismiss()
+            showCameraPhotoReviewDialog(photoFile)
+        }
+
+        useButton.setOnClickListener {
+            val finalOutputFile = runCatching {
+                val croppedBitmap = cropImageView.cropBitmap()
+                try {
+                    writeCroppedCameraPhoto(photoFile, croppedBitmap)
+                } finally {
+                    croppedBitmap.recycle()
+                }
+            }.getOrElse { error ->
+                val message = error.message ?: getString(R.string.camera_crop_failed)
+                statusView.text = message
+                showTransientMessage(message)
+                return@setOnClickListener
+            }
+
+            handled = true
+            attachCameraPhoto(finalOutputFile)
+            dialog.dismiss()
+        }
+
+        dialog.setOnDismissListener {
+            cropImageView.clearImage()
+            sourceBitmap.recycle()
+            if (!handled) {
+                runCatching { photoFile.delete() }
+            }
+        }
+
+        showPanelDialog(dialog)
+        dialog.window?.setLayout(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        )
+    }
+
+    private fun attachCameraPhoto(photoFile: File) {
+        importAndAddPendingImage(
+            uri = Uri.fromFile(photoFile),
+            source = OcrInput.Source.CAMERA,
+            tempFilePath = photoFile.absolutePath
+        )
+    }
+
+    private fun writeCroppedCameraPhoto(originalFile: File, croppedBitmap: Bitmap): File {
+        val croppedFile = createCameraOcrOutputFile()
+        try {
+            FileOutputStream(croppedFile).use { output ->
+                val compressed = croppedBitmap.compress(
+                    Bitmap.CompressFormat.JPEG,
+                    CAMERA_CROP_JPEG_QUALITY,
+                    output
+                )
+                if (!compressed) {
+                    throw IOException(getString(R.string.camera_crop_failed))
+                }
+            }
+
+            if (croppedFile.length() <= 0L) {
+                throw IOException(getString(R.string.camera_crop_failed))
+            }
+
+            runCatching { originalFile.delete() }
+            return croppedFile
+        } catch (error: Exception) {
+            runCatching { croppedFile.delete() }
+            throw error
+        }
+    }
+
+    private fun decodeBitmapForCameraCrop(imageFile: File): Bitmap {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            runCatching {
+                val source = ImageDecoder.createSource(imageFile)
+                return ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
+                    decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                    val width = info.size.width
+                    val height = info.size.height
+                    if (width > 0 && height > 0) {
+                        val (targetWidth, targetHeight) = cameraCropTargetSize(width, height)
+                        decoder.setTargetSize(targetWidth, targetHeight)
+                    }
+                }
+            }.onFailure { error ->
+                Log.w(TAG, "ImageDecoder could not decode camera crop image; falling back to BitmapFactory.", error)
+            }
+        }
+
+        val bounds = BitmapFactory.Options().apply {
+            inJustDecodeBounds = true
+        }
+        BitmapFactory.decodeFile(imageFile.absolutePath, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+            throw IOException(getString(R.string.camera_crop_failed))
+        }
+
+        val options = BitmapFactory.Options().apply {
+            inSampleSize = calculateCameraCropSampleSize(bounds.outWidth, bounds.outHeight)
+        }
+        val decodedBitmap = BitmapFactory.decodeFile(imageFile.absolutePath, options)
+            ?: throw IOException(getString(R.string.camera_crop_failed))
+        return ImageBitmapLoader.applyExifOrientation(decodedBitmap, imageFile)
+    }
+
+    private fun cameraCropTargetSize(width: Int, height: Int): Pair<Int, Int> {
+        val largestDimension = max(width, height)
+        if (largestDimension <= CAMERA_CROP_MAX_IMAGE_DIMENSION) {
+            return width.coerceAtLeast(1) to height.coerceAtLeast(1)
+        }
+
+        val scale = CAMERA_CROP_MAX_IMAGE_DIMENSION.toFloat() / largestDimension.toFloat()
+        return (width * scale).toInt().coerceAtLeast(1) to
+            (height * scale).toInt().coerceAtLeast(1)
+    }
+
+    private fun calculateCameraCropSampleSize(width: Int, height: Int): Int {
+        val largestDimension = max(width, height)
+        if (largestDimension <= CAMERA_CROP_MAX_IMAGE_DIMENSION) {
+            return 1
+        }
+
+        val ratio = ceil(largestDimension.toDouble() / CAMERA_CROP_MAX_IMAGE_DIMENSION.toDouble()).toInt()
+        var sampleSize = 1
+        while (sampleSize * 2 <= ratio) {
+            sampleSize *= 2
+        }
+        return sampleSize.coerceAtLeast(1)
+    }
+
+    private fun createCameraOcrOutputFile(): File {
+        val directory = File(cacheDir, "ocr_images").apply { mkdirs() }
+        return File.createTempFile("camera_ocr_", ".jpg", directory)
+    }
+
+    private fun cameraReadyStatusText(): String {
+        return if (currentImageInputMode == ImageInputMode.OCR) {
+            getString(R.string.camera_ocr_status_ready)
+        } else {
+            getString(R.string.camera_image_status_ready)
+        }
+    }
+
+    private fun currentImageContextSource(): ImageInputContextSource {
+        return when (currentImageInputMode) {
+            ImageInputMode.OCR -> ImageInputContextSource.OCR
+            ImageInputMode.GEMMA_DIRECT -> {
+                if (isGemmaDirectImageInputAvailable()) {
+                    ImageInputContextSource.GEMMA_DIRECT
+                } else {
+                    ImageInputContextSource.OCR
+                }
+            }
+        }
+    }
+
+    private fun isGemmaDirectImageInputAvailable(): Boolean {
+        val descriptor = currentModel ?: return false
+        val state = chatController?.state?.value ?: return descriptor.directImageInputAvailable
+        return when {
+            state.isReady -> state.supportsDirectImageInput
+            state.isLoading -> descriptor.directImageInputAvailable
+            else -> false
+        }
+    }
+
+    private fun isGemmaDirectImageInputSupportedBySelectedModel(): Boolean {
+        return currentModel?.directImageInputAvailable == true ||
+            chatController?.state?.value?.let { it.isReady && it.supportsDirectImageInput } == true
+    }
+
+    private fun usesNativeAudioForSelectedModel(): Boolean =
+        currentModel?.directAudioInputAvailable == true ||
+            chatController?.state?.value?.let { it.isReady && it.supportsNativeAudioInput } == true
+
+    private fun ensureImageInputModeAllowedForCurrentModel() {
+        if (currentImageInputMode == ImageInputMode.GEMMA_DIRECT && !isGemmaDirectImageInputAvailable()) {
+            selectOcrImageInputMode(resetGemmaDirectInputs = true)
+        }
+    }
+
+    private fun ensureImageInputModeAllowedForModel(descriptor: ModelDescriptor) {
+        if (!descriptor.directImageInputAvailable) {
+            selectOcrImageInputMode(resetGemmaDirectInputs = true)
+        }
+    }
+
+    private fun selectOcrImageInputMode(resetGemmaDirectInputs: Boolean) {
+        currentImageInputMode = ImageInputMode.OCR
+        modelSelectionStore.saveSelectedImageInputMode(ImageInputMode.OCR)
+        if (resetGemmaDirectInputs) {
+            resetGemmaDirectPendingInputsToOcr()
+        }
+        updateImageInputButtonDescriptions()
+    }
+
+    private fun resetGemmaDirectPendingInputsToOcr() {
+        var changed = false
+        for (index in pendingImageInputs.indices) {
+            val input = pendingImageInputs[index]
+            if (input.contextSource != ImageInputContextSource.GEMMA_DIRECT) {
+                continue
+            }
+
+            deletePendingImageTempFile(input)
+            pendingImageInputs[index] = input.copy(
+                contextSource = ImageInputContextSource.OCR,
+                status = PendingImageStatus.PENDING,
+                recognizedText = null,
+                errorMessage = null,
+                tempFilePath = null,
+                directImageFilePath = null
+            )
+            changed = true
+        }
+
+        if (changed) {
+            renderPendingImageInputs()
+        }
+    }
+
+    private fun stopCameraOcr() {
+        cameraProvider?.unbindAll()
+        cameraProvider = null
+        cameraImageCapture = null
+    }
+
+    private fun importAndAddPendingImage(
+        uri: Uri,
+        source: OcrInput.Source,
+        tempFilePath: String? = null
+    ) {
+        lifecycleScope.launch {
+            val savedImage = runCatching {
+                withContext(Dispatchers.IO) {
+                    savedImageStore.importImage(uri, source, tempFilePath)
+                }
+            }.getOrElse { error ->
+                tempFilePath?.let { path -> runCatching { File(path).delete() } }
+                showTransientMessage(error.message ?: getString(R.string.image_input_file_error))
+                return@launch
+            }
+
+            tempFilePath?.let { path ->
+                if (path != savedImage.filePath) {
+                    runCatching { File(path).delete() }
+                }
+            }
+            addPendingImageInput(savedImage)
+            refreshDrawerSessions()
+        }
+    }
+
+    private fun addPendingImageInput(savedImage: SavedImageEntry) {
+        if (activeAttachment != null || attachmentImportInProgress) {
+            showTransientMessage(getString(R.string.attachment_mixed_input_blocked))
+            return
+        }
+        if (isImagePreprocessingForSend) {
+            showTransientMessage(getString(R.string.image_input_processing))
+            return
+        }
+
+        ensureImageInputModeAllowedForCurrentModel()
+        val imageContextSource = currentImageContextSource()
+        if (imageContextSource == ImageInputContextSource.GEMMA_DIRECT && !isGemmaDirectImageInputAvailable()) {
+            showTransientMessage(getString(R.string.gemma_direct_image_model_unavailable))
+            return
+        }
+
+        val requestId = nextPendingImageInputId++
+        pendingImageInputs += PendingImageInput(
+            id = requestId,
+            savedImageId = savedImage.imageId,
+            savedImagePath = savedImage.filePath,
+            uri = Uri.fromFile(File(savedImage.filePath)),
+            source = savedImage.source,
+            contextSource = imageContextSource,
+            tempFilePath = null
+        )
+        renderPendingImageInputs()
+    }
+
+    private fun handleSendClick() {
+        val controller = chatController ?: return
+        if (isImagePreprocessingForSend || attachmentImportInProgress || audioPreparationJob?.isActive == true) {
+            return
+        }
+
+        if (pendingImageInputs.any { it.status == PendingImageStatus.FAILED }) {
+            showTransientMessage(getString(R.string.image_input_remove_failed))
+            return
+        }
+
+        if (imagePreprocessingJob?.isActive == true) {
+            return
+        }
+
+        val draft = captureComposerDraft()
+        val imagesForSend = pendingImageInputs.toList()
+        val shouldPreprocessAfterSend = imagesForSend.any { it.status == PendingImageStatus.PENDING }
+        if (!shouldPreprocessAfterSend) {
+            val prompt = buildComposerPrompt(draft, imagesForSend) ?: return
+            if (prompt.modelText.isBlank()) {
+                return
+            }
+
+            clearSpeechInputState()
+            val started = controller.sendPrompt(
+                prompt.modelText,
+                prompt.displayText,
+                prompt.imageFilePaths,
+                nativeAudioInputs = prompt.nativeAudioInputs,
+                attachmentContext = prompt.attachmentContext,
+                leadingTurns = prompt.imageTurns + prompt.attachmentTurns
+            )
+            if (started) {
+                confirmedAttachmentOperationKey = null
+                inputEditText.text.clear()
+                clearPendingImageInputs(keepTempFilePaths = prompt.imageFilePaths.toSet())
+                clearSentAttachmentFromComposer()
+                refreshDrawerSessions()
+            } else {
+                prompt.attachmentContext?.temporaryFiles?.forEach { File(it).delete() }
+            }
+            return
+        }
+
+        val displayText = buildComposerDisplayText(draft.typedText)
+        if (displayText.isBlank() && imagesForSend.isEmpty()) {
+            return
+        }
+
+        isImagePreprocessingForSend = true
+        autoScrollDuringGeneration = true
+        if (
+            !controller.beginPromptPreparation(
+                displayText = displayText,
+                statusText = getString(R.string.image_input_processing_status),
+                leadingTurns = buildImageChatTurns(imagesForSend)
+            )
+        ) {
+            isImagePreprocessingForSend = false
+            autoScrollDuringGeneration = false
+            applyChatState(controller.state.value)
+            return
+        }
+        clearSpeechInputState()
+        inputEditText.text.clear()
+        detachPendingImageInputs()
+        applyChatState(controller.state.value)
+
+        imagePreprocessingJob = lifecycleScope.launch {
+            var promptStarted = false
+            var processedImagesForSend = imagesForSend
+            try {
+                val processedImages = preprocessImagesForSend(imagesForSend)
+                if (processedImages == null) {
+                    controller.cancelPromptPreparation()
+                    restoreComposerDraft(draft)
+                    return@launch
+                }
+                processedImagesForSend = processedImages
+                isImagePreprocessingForSend = false
+                chatController?.let { applyChatState(it.state.value) }
+
+                val prompt = buildComposerPrompt(draft, processedImagesForSend) ?: run {
+                    controller.cancelPromptPreparation()
+                    restoreComposerDraft(draft)
+                    restorePendingImageInputs(processedImagesForSend)
+                    return@launch
+                }
+                if (prompt.modelText.isBlank()) {
+                    controller.cancelPromptPreparation()
+                    restoreComposerDraft(draft)
+                    restorePendingImageInputs(processedImagesForSend)
+                    return@launch
+                }
+
+                promptStarted = controller.sendPreparedPrompt(
+                    prompt.modelText,
+                    prompt.displayText,
+                    prompt.imageFilePaths,
+                    nativeAudioInputs = prompt.nativeAudioInputs,
+                    attachmentContext = prompt.attachmentContext
+                )
+                if (!promptStarted) {
+                    controller.cancelPromptPreparation()
+                    restoreComposerDraft(draft)
+                    restorePendingImageInputs(processedImagesForSend)
+                    return@launch
+                }
+                deletePendingImageTempFiles(
+                    imagesForSend + processedImagesForSend,
+                    keepTempFilePaths = prompt.imageFilePaths.toSet()
+                )
+                refreshDrawerSessions()
+            } catch (_: CancellationException) {
+                if (!promptStarted) {
+                    controller.cancelPromptPreparation()
+                    restoreComposerDraft(draft)
+                    restorePendingImageInputs(processedImagesForSend)
+                }
+                // Activity shutdown or a future explicit cancellation stops preprocessing.
+            } catch (error: Exception) {
+                if (!promptStarted) {
+                    controller.cancelPromptPreparation()
+                    restoreComposerDraft(draft)
+                    restorePendingImageInputs(processedImagesForSend)
+                }
+                showTransientMessage(error.message ?: getString(R.string.image_input_processing_failed))
+            } finally {
+                imagePreprocessingJob = null
+                isImagePreprocessingForSend = false
+                chatController?.let { applyChatState(it.state.value) }
+                if (!promptStarted) {
+                    autoScrollDuringGeneration = false
+                }
+            }
+        }
+    }
+
+    private suspend fun preprocessImagesForSend(imagesForSend: List<PendingImageInput>): List<PendingImageInput>? {
+        val processedImages = imagesForSend.toMutableList()
+        if (processedImages.none { it.status == PendingImageStatus.PENDING }) {
+            return processedImages
+        }
+
+        isImagePreprocessingForSend = true
+        chatController?.let { applyChatState(it.state.value) }
+
+        for (index in processedImages.indices) {
+            val input = processedImages[index]
+            if (input.status != PendingImageStatus.PENDING) {
+                continue
+            }
+
+            val readingInput = input.copy(
+                status = PendingImageStatus.READING,
+                recognizedText = null,
+                errorMessage = null
+            )
+            processedImages[index] = readingInput
+
+            val result = when (readingInput.contextSource) {
+                ImageInputContextSource.OCR -> runCatching {
+                    preprocessImageWithOcr(readingInput)
+                }.getOrElse { error ->
+                    markImagePreprocessingFailed(processedImages, index, readingInput, error)
+                    return null
+                }
+                ImageInputContextSource.GEMMA_DIRECT -> runCatching {
+                    preprocessImageForGemmaDirect(readingInput)
+                }.getOrElse { error ->
+                    markImagePreprocessingFailed(processedImages, index, readingInput, error)
+                    return null
+                }
+            }
+
+            val isDirectGemmaInput = readingInput.contextSource == ImageInputContextSource.GEMMA_DIRECT
+            if (!isDirectGemmaInput && result.text.isBlank()) {
+                val message = getString(R.string.ocr_no_text)
+                processedImages[index] = readingInput.copy(
+                    status = PendingImageStatus.FAILED,
+                    recognizedText = null,
+                    errorMessage = message,
+                    tempFilePath = result.tempFilePath
+                )
+                restorePendingImageInputs(processedImages)
+                showTransientMessage(message)
+                return null
+            }
+            if (isDirectGemmaInput && result.directImageFilePath.isNullOrBlank()) {
+                val message = getString(R.string.gemma_direct_image_processing_failed)
+                processedImages[index] = readingInput.copy(
+                    status = PendingImageStatus.FAILED,
+                    recognizedText = null,
+                    errorMessage = message,
+                    tempFilePath = result.tempFilePath,
+                    directImageFilePath = null
+                )
+                restorePendingImageInputs(processedImages)
+                showTransientMessage(message)
+                return null
+            }
+
+            processedImages[index] = readingInput.copy(
+                status = PendingImageStatus.READY,
+                recognizedText = result.text,
+                errorMessage = null,
+                tempFilePath = result.tempFilePath,
+                directImageFilePath = result.directImageFilePath
+            )
+        }
+
+        return processedImages
+    }
+
+    private fun markImagePreprocessingFailed(
+        processedImages: MutableList<PendingImageInput>,
+        index: Int,
+        input: PendingImageInput,
+        error: Throwable
+    ) {
+        val message = imagePreprocessingErrorMessage(input, error)
+        processedImages[index] = input.copy(
+            status = PendingImageStatus.FAILED,
+            recognizedText = null,
+            errorMessage = message
+        )
+        restorePendingImageInputs(processedImages)
+        showTransientMessage(message)
+    }
+
+    private fun imagePreprocessingErrorMessage(input: PendingImageInput, error: Throwable): String {
+        return when {
+            input.contextSource == ImageInputContextSource.GEMMA_DIRECT -> error.message
+                ?: getString(R.string.gemma_direct_image_processing_failed)
+            input.contextSource == ImageInputContextSource.OCR -> error.message
+                ?: getString(R.string.ocr_no_text)
+            else -> error.message ?: getString(R.string.image_input_processing_failed)
+        }
+    }
+
+    private suspend fun preprocessImageWithOcr(input: PendingImageInput): ImagePreprocessingResult {
+        val rawText = ocrInput?.recognizeImageUriText(input.uri)
+            ?: throw IllegalStateException("OCR is not available.")
+        return ImagePreprocessingResult(
+            text = PromptPreprocessor.normalize(rawText),
+            tempFilePath = input.tempFilePath
+        )
+    }
+
+    private suspend fun preprocessImageForGemmaDirect(input: PendingImageInput): ImagePreprocessingResult {
+        if (!isGemmaDirectImageInputAvailable()) {
+            throw IllegalStateException(getString(R.string.gemma_direct_image_model_unavailable))
+        }
+
+        val imageFile = runCatching {
+            prepareDirectImageFile(input.uri, input.tempFilePath)
+        }.getOrElse { error ->
+            throw IOException(getString(R.string.gemma_direct_image_processing_failed), error)
+        }
+        return ImagePreprocessingResult(
+            text = "",
+            tempFilePath = imageFile.absolutePath,
+            directImageFilePath = imageFile.absolutePath
+        )
+    }
+
+    private fun removePendingImageInput(requestId: Long) {
+        if (isImagePreprocessingForSend) {
+            showTransientMessage(getString(R.string.image_input_processing))
+            return
+        }
+
+        val index = pendingImageInputs.indexOfFirst { it.id == requestId }
+        if (index == -1) {
+            return
+        }
+
+        deletePendingImageTempFile(pendingImageInputs.removeAt(index))
+        renderPendingImageInputs()
+    }
+
+    private fun clearPendingImageInputs(keepTempFilePaths: Set<String> = emptySet()) {
+        if (isImagePreprocessingForSend) {
+            return
+        }
+
+        if (pendingImageInputs.isEmpty()) {
+            renderPendingImageInputs()
+            return
+        }
+
+        pendingImageInputs.forEach { input ->
+            deletePendingImageTempFile(input, keepTempFilePaths)
+        }
+        pendingImageInputs.clear()
+        renderPendingImageInputs()
+    }
+
+    private fun detachPendingImageInputs() {
+        pendingImageInputs.clear()
+        renderPendingImageInputs()
+    }
+
+    private fun restorePendingImageInputs(inputs: List<PendingImageInput>) {
+        pendingImageInputs.clear()
+        pendingImageInputs.addAll(inputs)
+        renderPendingImageInputs()
+    }
+
+    private fun deletePendingImageTempFiles(
+        inputs: List<PendingImageInput>,
+        keepTempFilePaths: Set<String> = emptySet()
+    ) {
+        inputs.forEach { input ->
+            deletePendingImageTempFile(input, keepTempFilePaths)
+        }
+    }
+
+    private fun deletePendingImageTempFile(
+        input: PendingImageInput,
+        keepTempFilePaths: Set<String> = emptySet()
+    ) {
+        input.tempFilePath?.let { path ->
+            if (path in keepTempFilePaths) {
+                return@let
+            }
+            runCatching { File(path).delete() }
+        }
+    }
+
+    private fun prepareDirectImageFile(uri: Uri, tempFilePath: String?): File {
+        val existingTempFile = tempFilePath
+            ?.let(::File)
+            ?.takeIf { it.exists() && it.length() > 0L }
+        if (existingTempFile != null && isPreparedDirectImageFile(existingTempFile)) {
+            return existingTempFile
+        }
+
+        return normalizeImageForDirectInput(uri, existingTempFile)
+    }
+
+    private fun isPreparedDirectImageFile(file: File): Boolean {
+        return file.parentFile?.name == "direct_image_inputs" &&
+            file.extension.equals("jpg", ignoreCase = true)
+    }
+
+    private fun normalizeImageForDirectInput(uri: Uri, sourceFile: File?): File {
+        val decodedBitmap = decodeBitmapForDirectInput(uri, sourceFile)
+        val decodedWidth = decodedBitmap.width
+        val decodedHeight = decodedBitmap.height
+        val normalizedBitmap = normalizeBitmapForDirectInputJpeg(decodedBitmap)
+        if (normalizedBitmap !== decodedBitmap) {
+            decodedBitmap.recycle()
+        }
+
+        val directory = File(cacheDir, "direct_image_inputs").apply { mkdirs() }
+        val outputFile = File.createTempFile("direct_image_input_", ".jpg", directory)
+        try {
+            Log.d(
+                TAG,
+                "Prepared direct image input: ${decodedWidth}x${decodedHeight} -> " +
+                    "${normalizedBitmap.width}x${normalizedBitmap.height}, source=${imageInputSourceLabel(sourceFile)}"
+            )
+            FileOutputStream(outputFile).use { output ->
+                val compressed = normalizedBitmap.compress(
+                    Bitmap.CompressFormat.JPEG,
+                    IMAGE_INPUT_JPEG_QUALITY,
+                    output
+                )
+                if (!compressed) {
+                    throw IOException(getString(R.string.image_input_file_error))
+                }
+            }
+
+            if (outputFile.length() <= 0L) {
+                throw IOException(getString(R.string.image_input_file_error))
+            }
+
+            return outputFile
+        } catch (error: Exception) {
+            runCatching { outputFile.delete() }
+            throw error
+        } finally {
+            normalizedBitmap.recycle()
+        }
+    }
+
+    private fun decodeBitmapForDirectInput(uri: Uri, sourceFile: File?): Bitmap {
+        val orientationSourceFile = resolveImageSourceFile(uri, sourceFile)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            decodeBitmapWithImageDecoder(uri, sourceFile)
+                .onSuccess { bitmap ->
+                    return ImageBitmapLoader.applyExifOrientation(bitmap, orientationSourceFile)
+                }
+                .onFailure { error ->
+                    Log.w(TAG, "ImageDecoder could not decode direct image input; falling back to BitmapFactory.", error)
+                }
+        }
+
+        return ImageBitmapLoader.applyExifOrientation(
+            decodeBitmapWithBitmapFactory(uri, sourceFile),
+            orientationSourceFile
+        )
+    }
+
+    private fun decodeBitmapWithImageDecoder(uri: Uri, sourceFile: File?): Result<Bitmap> {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+            return Result.failure(UnsupportedOperationException("ImageDecoder requires Android 9 or newer."))
+        }
+
+        return runCatching {
+            val source = if (sourceFile != null && sourceFile.exists()) {
+                ImageDecoder.createSource(sourceFile)
+            } else {
+                ImageDecoder.createSource(contentResolver, uri)
+            }
+
+            ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
+                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                val width = info.size.width
+                val height = info.size.height
+                if (width > 0 && height > 0) {
+                    val (targetWidth, targetHeight) = directImageTargetSize(width, height)
+                    decoder.setTargetSize(targetWidth, targetHeight)
+                }
+            }
+        }
+    }
+
+    private fun decodeBitmapWithBitmapFactory(uri: Uri, sourceFile: File?): Bitmap {
+        val bounds = BitmapFactory.Options().apply {
+            inJustDecodeBounds = true
+        }
+        openDirectImageInput(uri, sourceFile).use { input ->
+            BitmapFactory.decodeStream(input, null, bounds)
+        }
+
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+            throw IOException(getString(R.string.image_input_file_error))
+        }
+
+        val decodeOptions = BitmapFactory.Options().apply {
+            inSampleSize = calculateDirectImageSampleSize(bounds.outWidth, bounds.outHeight)
+        }
+        return openDirectImageInput(uri, sourceFile).use { input ->
+            BitmapFactory.decodeStream(input, null, decodeOptions)
+        } ?: throw IOException(getString(R.string.image_input_file_error))
+    }
+
+    private fun openDirectImageInput(uri: Uri, sourceFile: File?): java.io.InputStream {
+        if (sourceFile != null && sourceFile.exists()) {
+            return sourceFile.inputStream()
+        }
+
+        return contentResolver.openInputStream(uri)
+            ?: throw IOException(getString(R.string.image_input_file_error))
+    }
+
+    private fun resolveImageSourceFile(uri: Uri, sourceFile: File?): File? {
+        if (sourceFile != null && sourceFile.exists()) {
+            return sourceFile
+        }
+
+        if (uri.scheme.equals("file", ignoreCase = true)) {
+            return uri.path?.let(::File)?.takeIf { it.exists() }
+        }
+
+        return null
+    }
+
+    private fun calculateDirectImageSampleSize(width: Int, height: Int): Int {
+        val largestDimension = max(width, height)
+        if (largestDimension <= IMAGE_INPUT_MAX_DIMENSION) {
+            return 1
+        }
+
+        val ratio = ceil(largestDimension.toDouble() / IMAGE_INPUT_MAX_DIMENSION.toDouble()).toInt()
+        var sampleSize = 1
+        while (sampleSize * 2 <= ratio) {
+            sampleSize *= 2
+        }
+        return sampleSize.coerceAtLeast(1)
+    }
+
+    private fun directImageTargetSize(width: Int, height: Int): Pair<Int, Int> {
+        val largestDimension = max(width, height)
+        if (largestDimension <= IMAGE_INPUT_MAX_DIMENSION) {
+            return width.coerceAtLeast(1) to height.coerceAtLeast(1)
+        }
+
+        val scale = IMAGE_INPUT_MAX_DIMENSION.toFloat() / largestDimension.toFloat()
+        return (width * scale).toInt().coerceAtLeast(1) to
+            (height * scale).toInt().coerceAtLeast(1)
+    }
+
+    private fun scaleBitmapForDirectInput(bitmap: Bitmap): Bitmap {
+        val largestDimension = max(bitmap.width, bitmap.height)
+        if (largestDimension <= IMAGE_INPUT_MAX_DIMENSION) {
+            return bitmap
+        }
+
+        val scale = IMAGE_INPUT_MAX_DIMENSION.toFloat() / largestDimension.toFloat()
+        val targetWidth = (bitmap.width * scale).toInt().coerceAtLeast(1)
+        val targetHeight = (bitmap.height * scale).toInt().coerceAtLeast(1)
+        return Bitmap.createScaledBitmap(bitmap, targetWidth, targetHeight, true)
+    }
+
+    private fun normalizeBitmapForDirectInputJpeg(bitmap: Bitmap): Bitmap {
+        val scaledBitmap = scaleBitmapForDirectInput(bitmap)
+        val outputBitmap = if (shouldPadBitmapForDirectInput(scaledBitmap)) {
+            val canvasSize = max(scaledBitmap.width, scaledBitmap.height)
+                .coerceAtLeast(IMAGE_INPUT_MIN_NORMALIZED_DIMENSION)
+                .coerceAtMost(IMAGE_INPUT_MAX_DIMENSION)
+            Bitmap.createBitmap(canvasSize, canvasSize, Bitmap.Config.ARGB_8888).also { canvasBitmap ->
+                val canvas = Canvas(canvasBitmap)
+                canvas.drawColor(Color.WHITE)
+                canvas.drawBitmap(
+                    scaledBitmap,
+                    ((canvasSize - scaledBitmap.width) / 2f).coerceAtLeast(0f),
+                    ((canvasSize - scaledBitmap.height) / 2f).coerceAtLeast(0f),
+                    null
+                )
+            }
+        } else if (scaledBitmap.hasAlpha()) {
+            Bitmap.createBitmap(scaledBitmap.width, scaledBitmap.height, Bitmap.Config.ARGB_8888).also { canvasBitmap ->
+                val canvas = Canvas(canvasBitmap)
+                canvas.drawColor(Color.WHITE)
+                canvas.drawBitmap(scaledBitmap, 0f, 0f, null)
+            }
+        } else {
+            scaledBitmap
+        }
+
+        if (outputBitmap !== scaledBitmap && scaledBitmap !== bitmap) {
+            scaledBitmap.recycle()
+        }
+        return outputBitmap
+    }
+
+    private fun shouldPadBitmapForDirectInput(bitmap: Bitmap): Boolean {
+        val smallerDimension = minOf(bitmap.width, bitmap.height).coerceAtLeast(1)
+        val largerDimension = max(bitmap.width, bitmap.height).coerceAtLeast(1)
+        return smallerDimension < IMAGE_INPUT_MIN_NORMALIZED_DIMENSION &&
+            largerDimension.toFloat() / smallerDimension.toFloat() > IMAGE_INPUT_EXTREME_ASPECT_RATIO
+    }
+
+    private fun imageInputSourceLabel(sourceFile: File?): String {
+        return sourceFile?.let { file ->
+            "${file.name} (${file.length()} bytes)"
+        } ?: "content uri"
+    }
+
+    private fun renderPendingImageInputs() {
+        if (!::pendingImageInputsContainer.isInitialized || !::pendingImageInputsScroll.isInitialized) {
+            return
+        }
+
+        pendingImageInputsScroll.visibility = if (pendingImageInputs.isEmpty()) View.GONE else View.VISIBLE
+        pendingImageInputsContainer.removeAllViews()
+        pendingImageInputs.forEach { input ->
+            pendingImageInputsContainer.addView(createPendingImageChip(input))
+        }
+    }
+
+    private fun createPendingImageChip(input: PendingImageInput): View {
+        val chip = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = ContextCompat.getDrawable(this@ChatBotProActivity, R.drawable.bg_image_input_chip)
+            setPadding(dp(5), dp(4), dp(4), dp(4))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                dp(46)
+            ).apply {
+                marginEnd = dp(6)
+            }
+        }
+
+        chip.addView(
+            ImageView(this).apply {
+                layoutParams = LinearLayout.LayoutParams(dp(34), dp(34))
+                scaleType = ImageView.ScaleType.CENTER_CROP
+                setBackgroundColor(Color.BLACK)
+                val previewBitmap = ImageBitmapLoader.decodeSampledBitmap(
+                    imageFile = File(input.savedImagePath),
+                    requestedWidth = dp(34),
+                    requestedHeight = dp(34)
+                )
+                if (previewBitmap != null) {
+                    setImageBitmap(previewBitmap)
+                } else {
+                    setImageResource(R.drawable.ic_image_24)
+                }
+            }
+        )
+
+        chip.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_VERTICAL
+                layoutParams = LinearLayout.LayoutParams(dp(58), ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                    marginStart = dp(6)
+                }
+
+                addView(
+                    TextView(this@ChatBotProActivity).apply {
+                        text = if (input.source == OcrInput.Source.CAMERA) {
+                            getString(R.string.photo_input_label)
+                        } else {
+                            getString(R.string.image_input_label)
+                        }
+                        setTextColor(resolveThemeColor(R.attr.colorAssistantText))
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                        setTypeface(typeface, android.graphics.Typeface.BOLD)
+                        maxLines = 1
+                    }
+                )
+
+                addView(
+                    TextView(this@ChatBotProActivity).apply {
+                        text = pendingImageStatusText(input)
+                        setTextColor(pendingImageStatusColor(input))
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                        maxLines = 1
+                    }
+                )
+            }
+        )
+
+        chip.addView(
+            ImageButton(this).apply {
+                layoutParams = LinearLayout.LayoutParams(dp(26), dp(26))
+                background = null
+                contentDescription = getString(R.string.remove_image_input)
+                setImageResource(R.drawable.ic_close_18)
+                setColorFilter(resolveThemeColor(R.attr.colorStatusText))
+                setPadding(dp(4), dp(4), dp(4), dp(4))
+                setOnClickListener { removePendingImageInput(input.id) }
+            }
+        )
+
+        if (input.status == PendingImageStatus.FAILED && !input.errorMessage.isNullOrBlank()) {
+            chip.isClickable = true
+            chip.isFocusable = true
+            chip.setOnClickListener { showImageInputError(input) }
+        }
+
+        return chip
+    }
+
+    private fun showImageInputError(input: PendingImageInput) {
+        val message = input.errorMessage ?: return
+        MaterialAlertDialogBuilder(this)
+            .setTitle(getString(R.string.image_input_error_title))
+            .setMessage(message)
+            .setPositiveButton(android.R.string.ok, null)
+            .show()
+    }
+
+    private fun pendingImageStatusText(input: PendingImageInput): String {
+        return when (input.status) {
+            PendingImageStatus.PENDING -> getString(R.string.image_input_pending)
+            PendingImageStatus.READING -> when (input.contextSource) {
+                ImageInputContextSource.GEMMA_DIRECT -> getString(R.string.image_input_preparing)
+                ImageInputContextSource.OCR -> getString(R.string.image_input_reading)
+            }
+            PendingImageStatus.READY -> getString(R.string.image_input_ready)
+            PendingImageStatus.FAILED -> when (input.contextSource) {
+                ImageInputContextSource.OCR -> getString(R.string.image_input_failed)
+                ImageInputContextSource.GEMMA_DIRECT -> getString(R.string.image_input_failed_generic)
+            }
+        }
+    }
+
+    private fun pendingImageStatusColor(input: PendingImageInput): Int {
+        return when (input.status) {
+            PendingImageStatus.FAILED -> ContextCompat.getColor(this, R.color.delete_red)
+            else -> resolveThemeColor(R.attr.colorStatusText)
+        }
+    }
+
+    private fun captureComposerDraft(): ComposerDraft {
+        val typedText = PromptPreprocessor.normalize(inputEditText.text.toString())
+        val voiceText = currentVoiceTranscriptForPrompt(typedText)
+        val typedTextWithoutVoice = if (voiceText != null) {
+            PromptPreprocessor.normalize(speechBasePromptText)
+        } else {
+            typedText
+        }
+
+        return ComposerDraft(
+            typedText = typedText,
+            typedTextWithoutVoice = typedTextWithoutVoice,
+            voiceText = voiceText
+        )
+    }
+
+    private fun restoreComposerDraft(draft: ComposerDraft) {
+        if (draft.typedText.isNotBlank()) {
+            setPromptInputText(draft.typedText)
+        }
+    }
+
+    private fun buildComposerPrompt(
+        draft: ComposerDraft = captureComposerDraft(),
+        images: List<PendingImageInput> = pendingImageInputs
+    ): ComposerPrompt? {
+        if (attachmentImportInProgress) {
+            showTransientMessage(getString(R.string.attachment_importing))
+            return null
+        }
+        val descriptor = activeAttachment
+        if (descriptor != null && images.isNotEmpty()) {
+            showTransientMessage(getString(R.string.attachment_mixed_input_blocked))
+            return null
+        }
+        if (descriptor?.status == AttachmentStatus.FAILED) {
+            showTransientMessage(descriptor.errorMessage ?: "Attachment preparation failed.")
+            return null
+        }
+        if (images.any { it.status == PendingImageStatus.PENDING || it.status == PendingImageStatus.READING }) {
+            showTransientMessage(getString(R.string.image_input_processing))
+            return null
+        }
+        if (images.any { it.status == PendingImageStatus.FAILED }) {
+            showTransientMessage(getString(R.string.image_input_remove_failed))
+            return null
+        }
+
+        val readyTextImages = images.filter {
+            it.status == PendingImageStatus.READY &&
+                it.contextSource != ImageInputContextSource.GEMMA_DIRECT &&
+                !it.recognizedText.isNullOrBlank()
+        }
+        val directGemmaImagePaths = images
+            .filter {
+                it.status == PendingImageStatus.READY &&
+                    it.contextSource == ImageInputContextSource.GEMMA_DIRECT &&
+                    !it.directImageFilePath.isNullOrBlank()
+            }
+            .mapNotNull { it.directImageFilePath }
+        val modelText = buildSourceAwareModelText(
+            typedText = draft.typedTextWithoutVoice,
+            voiceText = draft.voiceText,
+            images = readyTextImages,
+            hasDirectGemmaImages = directGemmaImagePaths.isNotEmpty()
+        ).ifBlank {
+            if (directGemmaImagePaths.isNotEmpty()) {
+                getString(R.string.gemma_direct_default_prompt)
+            } else {
+                ""
+            }
+        }
+        if (descriptor != null && modelText.isBlank()) {
+            showTransientMessage(getString(R.string.attachment_question_required))
+            return null
+        }
+        if (modelText.isBlank()) {
+            return null
+        }
+
+        val attachmentContext = descriptor?.let { buildActiveAttachmentContext(it, modelText) }
+            ?: if (descriptor != null) return null else null
+
+        return ComposerPrompt(
+            modelText = modelText,
+            displayText = buildComposerDisplayText(draft.typedText),
+            imageFilePaths = directGemmaImagePaths,
+            nativeAudioInputs = attachmentContext?.nativeAudioInputs.orEmpty(),
+            attachmentContext = attachmentContext,
+            imageTurns = buildImageChatTurns(images),
+            attachmentTurns = descriptor?.let(::buildAttachmentChatTurn)?.let(::listOf).orEmpty()
+        )
+    }
+
+    private fun buildActiveAttachmentContext(
+        descriptor: AttachmentDescriptor,
+        userPrompt: String
+    ): AttachmentContext? {
+        val controller = chatController ?: return null
+        return when (descriptor.kind) {
+            AttachmentKind.TEXT, AttachmentKind.PDF -> {
+                val chunks = attachmentRepository.loadChunks(descriptor)
+                if (chunks.isEmpty()) {
+                    showTransientMessage("No extracted attachment text is available.")
+                    null
+                } else {
+                    buildPlannedAttachmentContext(controller, descriptor, chunks, userPrompt)
+                }
+            }
+
+            AttachmentKind.AUDIO -> {
+                if (usesNativeAudioForSelectedModel()) {
+                    if (!controller.state.value.supportsNativeAudioInput) {
+                        showTransientMessage(getString(R.string.gemma_audio_unavailable))
+                        return null
+                    }
+                    val segmenter = GemmaAudioSegmenter(this, currentModel!!.nativeAudioSegmentMillis)
+                    val plan = runCatching { segmenter.plan(descriptor) }.getOrElse { error ->
+                        showTransientMessage(error.message ?: "Audio duration is unavailable.")
+                        return null
+                    }
+                    val confirmationKey = "${descriptor.id}:${userPrompt.hashCode()}:${currentModel?.id}:native-audio"
+                    if (
+                        plan.segmentCount > 1 &&
+                        confirmedAttachmentOperationKey != confirmationKey
+                    ) {
+                        MaterialAlertDialogBuilder(this)
+                            .setTitle("Process the full audio?")
+                            .setMessage(
+                                "The selected model will analyze ${plan.segmentCount} overlapping native-audio segments " +
+                                    "in ${plan.inferencePasses} inference passes and then combine them. " +
+                                    "It may take several minutes."
+                            )
+                            .setPositiveButton("Continue") { _, _ ->
+                                confirmedAttachmentOperationKey = confirmationKey
+                                handleSendClick()
+                            }
+                            .setNegativeButton(android.R.string.cancel, null)
+                            .show()
+                        return null
+                    }
+                    val segmented = if (plan.segmentCount == 1) {
+                        SegmentedNativeAudio(
+                            inputs = listOf(NativeAudioInput(descriptor.sourcePath, 0L, descriptor.durationMillis)),
+                            temporaryFiles = emptyList()
+                        )
+                    } else {
+                        preparedGemmaAudio?.takeIf { preparedGemmaAudioAttachmentId == descriptor.id }
+                            ?: run {
+                                prepareGemmaAudioAfterConfirmation(descriptor)
+                                return null
+                            }
+                    }
+                    preparedGemmaAudio = null
+                    preparedGemmaAudioAttachmentId = null
+                    AttachmentContext(
+                        attachmentId = descriptor.id,
+                        displayName = descriptor.displayName,
+                        route = AttachmentProcessingRoute.GEMMA_NATIVE_AUDIO,
+                        sourceRefs = segmented.inputs.map { input ->
+                            AttachmentSourceRef(startMillis = input.startMillis, endMillis = input.endMillis)
+                        },
+                        nativeAudioInputs = segmented.inputs,
+                        task = AttachmentTaskRouter.route(userPrompt),
+                        temporaryFiles = segmented.temporaryFiles
+                    )
+                } else {
+                    val transcriptChunks = attachmentRepository.loadChunks(descriptor)
+                    if (transcriptChunks.isEmpty()) {
+                        if (whisperModelStore.isAvailable()) {
+                            if (currentModel is GemmaLiteRtSpec) {
+                                showTransientMessage(getString(R.string.gemma_audio_transcribing))
+                            }
+                            prepareWhisperTranscript(descriptor)
+                        } else {
+                            offerWhisperPreparation(descriptor)
+                            showTransientMessage(
+                                getString(
+                                    if (currentModel is GemmaLiteRtSpec) {
+                                        R.string.gemma_audio_transcription_download_required
+                                    } else {
+                                        R.string.non_gemma_audio_download_required
+                                    }
+                                )
+                            )
+                        }
+                        null
+                    } else {
+                        buildPlannedAttachmentContext(controller, descriptor, transcriptChunks, userPrompt)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun buildPlannedAttachmentContext(
+        controller: PersistentChatController,
+        descriptor: AttachmentDescriptor,
+        chunks: List<AttachmentChunk>,
+        userPrompt: String
+    ): AttachmentContext? {
+        val context = runCatching { controller.buildAttachmentContext(descriptor, chunks, userPrompt) }
+            .getOrElse { error ->
+                showTransientMessage(error.message ?: "The attachment exceeds this model's prompt limits.")
+                return null
+            }
+        if (!context.requiresFinalSynthesis) return context
+        val confirmationKey = "${descriptor.id}:${userPrompt.hashCode()}:${context.task}"
+        if (confirmedAttachmentOperationKey == confirmationKey) return context
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Process the full attachment?")
+            .setMessage(
+                "This ${context.task.name.lowercase()} needs ${context.promptBatches.size} on-device passes " +
+                    "plus final combination. It may take several minutes."
+            )
+            .setPositiveButton("Continue") { _, _ ->
+                confirmedAttachmentOperationKey = confirmationKey
+                handleSendClick()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+        return null
+    }
+
+    private fun buildAttachmentChatTurn(descriptor: AttachmentDescriptor): ChatTurn {
+        return ChatTurn(
+            role = ChatRole.USER,
+            text = "",
+            contentType = ChatTurnContentType.ATTACHMENT,
+            attachmentId = descriptor.id,
+            attachmentName = attachmentDisplayName(descriptor),
+            attachmentKind = descriptor.kind,
+            attachmentProcessingRoute = descriptor.processingRoute
+        )
+    }
+
+    private fun currentVoiceTranscriptForPrompt(currentPromptText: String): String? {
+        val voiceText = PromptPreprocessor.normalize(speechRecognizedText)
+        if (voiceText.isBlank()) {
+            return null
+        }
+
+        val expectedPrompt = PromptPreprocessor.mergeTypedAndRecognized(
+            speechBasePromptText,
+            voiceText
+        )
+        return voiceText.takeIf { currentPromptText == expectedPrompt }
+    }
+
+    private fun buildSourceAwareModelText(
+        typedText: String,
+        voiceText: String?,
+        images: List<PendingImageInput>,
+        hasDirectGemmaImages: Boolean
+    ): String {
+        val hasTypedText = typedText.isNotBlank()
+        val hasVoiceText = !voiceText.isNullOrBlank()
+        val hasImageText = images.any { !it.recognizedText.isNullOrBlank() }
+
+        if (!hasVoiceText && !hasImageText && !hasDirectGemmaImages) {
+            return typedText
+        }
+        if (!hasTypedText && !hasVoiceText && !hasImageText && hasDirectGemmaImages) {
+            return ""
+        }
+
+        return buildString {
+            append("The following user input contains labeled sources. Use each section according to its label.")
+
+            if (hasTypedText) {
+                append("\n\n[Typed user message]\n")
+                append(typedText)
+            }
+
+            if (hasVoiceText) {
+                append("\n\n[Voice input transcription]\n")
+                append("This text was transcribed from the user's speech. Treat it as user-provided context or request text.\n")
+                append(voiceText)
+            }
+
+            val imageText = buildImageContextText(images)
+            if (imageText.isNotBlank()) {
+                append("\n\n")
+                append(imageText)
+            }
+
+            if (hasDirectGemmaImages) {
+                append("\n\n[Attached image input]\n")
+                append("The image file is attached directly to this message. Use the visual content itself when answering.")
+            }
+        }.trim()
+    }
+
+    private fun buildImageContextText(images: List<PendingImageInput>): String {
+        if (images.isEmpty()) {
+            return ""
+        }
+
+        return buildString {
+            append("[Image context]\n")
+            append("The following information was extracted from attached image input with OCR. Use it as context from the image; it was not typed directly by the user.")
+            images.forEachIndexed { index, input ->
+                val sourceLabel = if (input.source == OcrInput.Source.CAMERA) {
+                    "camera photo"
+                } else {
+                    "gallery image"
+                }
+                val contextLabel = when (input.contextSource) {
+                    ImageInputContextSource.OCR -> "OCR text"
+                    ImageInputContextSource.GEMMA_DIRECT -> "Native image"
+                }
+                append("\n\n[Image ")
+                append(index + 1)
+                append(" - ")
+                append(sourceLabel)
+                append(" - ")
+                append(contextLabel)
+                append("]\n")
+                append(input.recognizedText.orEmpty().trim())
+            }
+        }
+    }
+
+    private fun buildComposerDisplayText(typedText: String): String {
+        return typedText
+    }
+
+    private fun buildImageChatTurns(images: List<PendingImageInput>): List<ChatTurn> {
+        return images.map { input ->
+            ChatTurn(
+                role = ChatRole.USER,
+                text = "",
+                contentType = ChatTurnContentType.IMAGE,
+                imagePath = input.savedImagePath
+            )
+        }
+    }
+
+    private fun setPromptInputText(text: String) {
+        inputEditText.setText(text)
+        inputEditText.setSelection(inputEditText.text.length)
+    }
+
+    private fun showAttachmentMenu(anchor: View) {
+        if (pendingImageInputs.isNotEmpty()) {
+            showTransientMessage(getString(R.string.attachment_mixed_input_blocked))
+            return
+        }
+        PopupMenu(this, anchor).apply {
+            menu.add(getString(R.string.attachment_document)).setOnMenuItemClickListener {
+                documentPickerLauncher.launch(
+                    arrayOf(
+                        "application/pdf",
+                        "text/*",
+                        "application/json",
+                        "application/xml",
+                        "application/yaml"
+                    )
+                )
+                true
+            }
+            menu.add(getString(R.string.attachment_audio_file)).setOnMenuItemClickListener {
+                audioPickerLauncher.launch(arrayOf("audio/*", "video/mp4"))
+                true
+            }
+            show()
+        }
+    }
+
+    private fun showDictationRecordingDialog() {
+        if (dictationRecorder != null || dictationTranscriptionJob?.isActive == true) return
+        val controller = requireUsableController() ?: return
+        if (controller.state.value.isGenerating) return
+        if (!whisperModelStore.isAvailable()) {
+            val content = layoutInflater.inflate(R.layout.dialog_dictation_download, null)
+            val message: TextView = content.findViewById(R.id.dictationDownloadMessage)
+            val downloadButton: MaterialButton = content.findViewById(R.id.downloadDictationButton)
+            val notNowButton: MaterialButton = content.findViewById(R.id.notNowDictationButton)
+            message.text = getString(R.string.dictation_download_message, WhisperModelStore.DOWNLOAD_SIZE_LABEL)
+            val dialog = MaterialAlertDialogBuilder(this)
+                .setTitle(R.string.dictation_download_title)
+                .setView(content)
+                .create()
+            dialog.setOnShowListener {
+                downloadButton.setOnClickListener {
+                    dialog.dismiss()
+                    lifecycleScope.launch {
+                        runCatching { whisperModelStore.download() }
+                            .onSuccess { startDictationRecording() }
+                            .onFailure { showTransientMessage(it.message ?: getString(R.string.dictation_download_failed)) }
+                    }
+                }
+                notNowButton.setOnClickListener { dialog.dismiss() }
+            }
+            dialog.show()
+            return
+        }
+        if (!hasPermission(Manifest.permission.RECORD_AUDIO)) {
+            pendingDictationRecordingStart = true
+            dictationRecordingPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            return
+        }
+        startDictationRecording()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun startDictationRecording() {
+        if (dictationRecorder != null || dictationTranscriptionJob?.isActive == true) return
+        val directory = File(cacheDir, "temporary_dictation").apply { mkdirs() }
+        val recording = File.createTempFile("dictation_", ".m4a", directory)
+        val recorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) MediaRecorder(this) else MediaRecorder()
+        try {
+            recorder.setAudioSource(MediaRecorder.AudioSource.MIC)
+            recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+            recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+            recorder.setAudioSamplingRate(44_100)
+            recorder.setAudioEncodingBitRate(128_000)
+            recorder.setMaxDuration(AttachmentLimits.MAX_AUDIO_DURATION_MILLIS.toInt())
+            recorder.setOutputFile(recording.absolutePath)
+            recorder.prepare()
+            recorder.start()
+            dictationRecorder = recorder
+            dictationRecordingFile = recording
+            updateMicRecordingState(true)
+        } catch (error: Throwable) {
+            runCatching { recorder.release() }
+            recording.delete()
+            showTransientMessage(error.message ?: getString(R.string.record_audio_coming_soon))
+            return
+        }
+
+        val content = layoutInflater.inflate(R.layout.dialog_audio_recording, null)
+        val timer: TextView = content.findViewById(R.id.audioRecordingTimer)
+        val useButton: MaterialButton = content.findViewById(R.id.useAudioRecordingButton)
+        val discardButton: MaterialButton = content.findViewById(R.id.discardAudioRecordingButton)
+        val dialog = MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.dictation_record_title)
+            .setView(content)
+            .create()
+        dictationRecordingDialog = dialog
+        startDictationTimer(timer)
+        dialog.setOnShowListener {
+            useButton.setOnClickListener {
+                finishDictationRecording(transcribe = true)
+                dialog.dismiss()
+            }
+            discardButton.setOnClickListener {
+                finishDictationRecording(transcribe = false)
+                dialog.dismiss()
+            }
+        }
+        dialog.setOnCancelListener { finishDictationRecording(transcribe = false) }
+        dialog.setOnDismissListener {
+            if (dictationRecordingDialog === dialog) dictationRecordingDialog = null
+        }
+        dialog.show()
+    }
+
+    private fun finishDictationRecording(transcribe: Boolean) {
+        val recorder = dictationRecorder
+        val recording = dictationRecordingFile
+        dictationRecorder = null
+        dictationRecordingFile = null
+        stopDictationTimer()
+        updateMicRecordingState(false)
+        val stopped = recorder?.let { runCatching { it.stop() }.isSuccess } ?: false
+        runCatching { recorder?.release() }
+        if (transcribe && stopped && recording != null && recording.length() > 0L) {
+            transcribeDictation(recording)
+        } else {
+            recording?.delete()
+        }
+    }
+
+    private fun transcribeDictation(recording: File) {
+        if (dictationTranscriptionJob?.isActive == true) return
+        showTransientMessage(getString(R.string.dictation_transcribing))
+        showDictationTranscriptionDialog()
+        dictationTranscriptionJob = lifecycleScope.launch {
+            val normalized = File(cacheDir, "temporary_dictation/${recording.nameWithoutExtension}.wav")
+            try {
+                val transcriptionWork: suspend () -> String = {
+                    val audio = withContext(Dispatchers.IO) { AudioNormalizer().normalize(recording, normalized) }
+                    val descriptor = AttachmentDescriptor(
+                        sessionId = "temporary",
+                        displayName = recording.name,
+                        mimeType = "audio/wav",
+                        kind = AttachmentKind.AUDIO,
+                        status = AttachmentStatus.READY,
+                        processingRoute = AttachmentProcessingRoute.SHERPA_WHISPER,
+                        sourcePath = audio.file.absolutePath,
+                        sizeBytes = audio.file.length(),
+                        durationMillis = audio.durationMillis
+                    )
+                    WhisperAttachmentTranscriber(this@ChatBotProActivity)
+                        .transcribe(descriptor)
+                        .joinToString(" ") { it.text }
+                        .let(PromptPreprocessor::normalize)
+                }
+                val transcript = chatController?.withRuntimeLease { transcriptionWork() }
+                    ?: transcriptionWork()
+                if (transcript.isBlank()) {
+                    showTransientMessage(getString(R.string.dictation_no_speech))
+                } else {
+                    setPromptInputText(
+                        PromptPreprocessor.mergeTypedAndRecognized(inputEditText.text.toString(), transcript)
+                    )
+                }
+            } catch (_: CancellationException) {
+                // Lifecycle cancellation owns cleanup below.
+            } catch (error: Throwable) {
+                showTransientMessage(error.message ?: getString(R.string.dictation_transcription_failed))
+            } finally {
+                recording.delete()
+                normalized.delete()
+                dictationTranscriptionJob = null
+                dictationTranscriptionDialog?.dismiss()
+                dictationTranscriptionDialog = null
+            }
+        }
+    }
+
+    private fun showDictationTranscriptionDialog() {
+        if (dictationTranscriptionDialog?.isShowing == true) return
+        dictationTranscriptionDialog = MaterialAlertDialogBuilder(this)
+            .setView(R.layout.dialog_dictation_transcribing)
+            .setCancelable(false)
+            .create()
+            .also(AlertDialog::show)
+    }
+
+    private fun discardDictationRecording() {
+        finishDictationRecording(transcribe = false)
+        dictationRecordingDialog?.dismiss()
+        dictationRecordingDialog = null
+    }
+
+    private fun startDictationTimer(timer: TextView) {
+        stopDictationTimer()
+        dictationStartedAtMillis = SystemClock.elapsedRealtime()
+        val ticker = object : Runnable {
+            override fun run() {
+                val seconds = (SystemClock.elapsedRealtime() - dictationStartedAtMillis) / 1_000L
+                timer.text = formatDictationDuration(seconds)
+                dictationTimerHandler.postDelayed(this, 250L)
+            }
+        }
+        dictationTimer = ticker
+        ticker.run()
+    }
+
+    private fun stopDictationTimer() {
+        dictationTimer?.let(dictationTimerHandler::removeCallbacks)
+        dictationTimer = null
+    }
+
+    private fun formatDictationDuration(seconds: Long): String = if (seconds >= 3_600L) {
+        String.format(Locale.getDefault(), "%02d:%02d:%02d", seconds / 3_600L, (seconds % 3_600L) / 60L, seconds % 60L)
+    } else {
+        String.format(Locale.getDefault(), "%02d:%02d", seconds / 60L, seconds % 60L)
+    }
+
+    private fun importAttachment(uri: Uri, requestedKind: AttachmentKind) {
+        if (pendingImageInputs.isNotEmpty()) {
+            showTransientMessage(getString(R.string.attachment_mixed_input_blocked))
+            return
+        }
+        val controller = requireUsableController() ?: return
+        if (controller.state.value.isGenerating || attachmentImportJob?.isActive == true) return
+        runCatching {
+            contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        attachmentImportInProgress = true
+        activeAttachment = null
+        renderActiveAttachment()
+        val sessionId = controller.ensureSessionId()
+        val record = runCatching {
+            attachmentWorkerCoordinator.enqueueImport(
+                sessionId = sessionId,
+                uri = uri,
+                kind = requestedKind,
+                gemmaAudio = usesNativeAudioForSelectedModel()
+            )
+        }.getOrElse { error ->
+            attachmentImportInProgress = false
+            deleteRecordedAttachmentInput(uri)
+            showTransientMessage(error.message ?: "Attachment import could not be started.")
+            renderActiveAttachment()
+            return
+        }
+        observeAttachmentWork(record)
+    }
+
+    private fun deleteRecordedAttachmentInput(uri: Uri) {
+        if (uri.scheme != "file") return
+        val file = uri.path?.let(::File) ?: return
+        val recordingsDirectory = File(cacheDir, "attachment_recordings")
+        val safe = runCatching {
+            file.canonicalPath.startsWith(recordingsDirectory.canonicalPath + File.separator)
+        }.getOrDefault(false)
+        if (safe) file.delete()
+    }
+
+    private fun offerWhisperPreparation(descriptor: AttachmentDescriptor) {
+        if (whisperModelStore.isAvailable()) {
+            prepareWhisperTranscript(descriptor)
+            return
+        }
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Download multilingual transcription model?")
+            .setMessage(
+                "This model uses sherpa-onnx Whisper tiny int8 (${WhisperModelStore.DOWNLOAD_SIZE_LABEL}) for transcription. " +
+                    "It downloads only after your confirmation and stays on this device."
+            )
+            .setPositiveButton("Download") { _, _ -> downloadWhisperAndPrepare(descriptor) }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun downloadWhisperAndPrepare(descriptor: AttachmentDescriptor) {
+        if (audioPreparationJob?.isActive == true) return
+        attachmentImportInProgress = true
+        renderActiveAttachment()
+        audioPreparationJob = lifecycleScope.launch {
+            try {
+                whisperModelStore.download { downloaded, total ->
+                    runOnUiThread {
+                        activeAttachmentText.text = getString(
+                            R.string.whisper_download_progress,
+                            (downloaded * 100L / total.coerceAtLeast(1L)).coerceIn(0L, 100L)
+                        )
+                    }
+                }
+                attachmentImportInProgress = false
+                audioPreparationJob = null
+                prepareWhisperTranscript(descriptor)
+            } catch (_: CancellationException) {
+                // Cancel/detach owns the resulting attachment UI state.
+            } catch (error: Throwable) {
+                attachmentImportInProgress = false
+                audioPreparationJob = null
+                showTransientMessage(error.message ?: "Could not download the transcription model.")
+                renderActiveAttachment()
+            }
+        }
+    }
+
+    private fun prepareWhisperTranscript(descriptor: AttachmentDescriptor) {
+        if (activeAttachmentWork != null) return
+        val processing = descriptor.copy(
+            status = AttachmentStatus.PROCESSING,
+            updatedAtMillis = System.currentTimeMillis(),
+            errorMessage = null
+        )
+        activeAttachment = processing
+        attachmentRepository.saveDescriptor(processing)
+        renderActiveAttachment()
+        val record = runCatching {
+            attachmentWorkerCoordinator.enqueueWhisper(processing.sessionId, processing.id)
+        }.getOrElse { error ->
+            activeAttachment = processing.copy(
+                status = AttachmentStatus.FAILED,
+                errorMessage = error.message ?: "Audio transcription could not be started.",
+                retryOperation = AttachmentWorkOperation.WHISPER_TRANSCRIPTION
+            ).also(attachmentRepository::saveDescriptor)
+            renderActiveAttachment()
+            return
+        }
+        observeAttachmentWork(record)
+    }
+
+    private fun detachActiveAttachment() {
+        activeAttachmentWork?.let(::cancelAndForgetWork)
+        attachmentImportJob?.cancel()
+        attachmentImportJob = null
+        audioPreparationJob?.cancel()
+        audioPreparationJob = null
+        attachmentImportInProgress = false
+        activeAttachment = null
+        confirmedAttachmentOperationKey = null
+        chatController?.setActiveAttachment(null)
+        renderActiveAttachment()
+    }
+
+    private val dictationRecordingPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val shouldStart = pendingDictationRecordingStart
+        pendingDictationRecordingStart = false
+        if (granted && shouldStart) {
+            startDictationRecording()
+        } else if (!granted) {
+            showTransientMessage(getString(R.string.speech_permission_denied))
+        }
+    }
+
+    private fun clearSentAttachmentFromComposer() {
+        if (activeAttachment?.kind != AttachmentKind.AUDIO) return
+        activeAttachment = null
+        chatController?.setActiveAttachment(null)
+        renderActiveAttachment()
+    }
+
+    private fun cancelActiveAttachmentWork() {
+        val record = activeAttachmentWork
+        record?.let {
+            attachmentWorkerCoordinator.cancel(java.util.UUID.fromString(it.workId))
+            attachmentRepository.deleteWorkRecord(it)
+        }
+        activeAttachmentWork = null
+        activeAttachmentWorkState = androidx.work.WorkInfo.State.CANCELLED
+        attachmentImportJob?.cancel()
+        attachmentImportJob = null
+        audioPreparationJob?.cancel()
+        audioPreparationJob = null
+        attachmentImportInProgress = false
+        activeAttachment = activeAttachment?.copy(
+            status = AttachmentStatus.FAILED,
+            updatedAtMillis = System.currentTimeMillis(),
+            errorMessage = "Processing cancelled. Retry or detach the attachment.",
+            retryOperation = record?.operation ?: activeAttachment?.retryOperation
+        )?.also(attachmentRepository::saveDescriptor)
+        renderActiveAttachment()
+    }
+
+    private fun reactivateAttachmentTurn(turn: ChatTurn) {
+        val controller = chatController ?: return
+        if (controller.state.value.isGenerating || attachmentImportInProgress) return
+        val attachmentId = turn.attachmentId ?: return
+        val sessionId = controller.snapshotActiveChat().sessionId ?: return
+        val descriptor = attachmentRepository.loadDescriptor(sessionId, attachmentId)
+        if (descriptor == null) {
+            showTransientMessage("That attachment is no longer available.")
+            return
+        }
+        if (pendingImageInputs.isNotEmpty()) clearPendingImageInputs()
+        activeAttachment = descriptor
+        controller.setActiveAttachment(descriptor.id)
+        renderActiveAttachment()
+    }
+
+    private fun restoreActiveAttachmentIfNeeded(attachmentId: String?) {
+        if (attachmentId == null) {
+            if (!attachmentImportInProgress) activeAttachment = null
+            renderActiveAttachment()
+            return
+        }
+        if (activeAttachment?.id == attachmentId) return
+        val snapshot = chatController?.snapshotActiveChat() ?: return
+        val sessionId = snapshot.sessionId ?: return
+        activeAttachment = attachmentRepository.loadDescriptor(sessionId, attachmentId)
+        renderActiveAttachment()
+    }
+
+    private fun reconnectActiveAttachmentWorkIfNeeded() {
+        if (attachmentImportJob?.isActive == true || activeAttachmentWork != null) return
+        val controller = chatController ?: return
+        val sessionId = controller.snapshotActiveChat().sessionId
+        val record = AttachmentWorkPolicy.selectForRestoration(
+            sessionId,
+            attachmentRepository.listWorkRecords()
+        ) ?: return
+        controller.restoreAttachmentSession(record.sessionId)
+        attachmentRepository.loadDescriptor(record.sessionId, record.attachmentId)?.let {
+            activeAttachment = it
+        }
+        observeAttachmentWork(record)
+        activeAttachment?.let { controller.setActiveAttachment(it.id) }
+    }
+
+    private fun observeAttachmentWork(record: AttachmentWorkRecord) {
+        if (activeAttachmentWork?.workId == record.workId && attachmentImportJob?.isActive == true) return
+        attachmentImportJob?.cancel()
+        activeAttachmentWork = record
+        activeAttachmentWorkState = androidx.work.WorkInfo.State.ENQUEUED
+        attachmentImportInProgress = record.operation == AttachmentWorkOperation.IMPORT
+        renderActiveAttachment()
+        attachmentImportJob = lifecycleScope.launch {
+            try {
+                val awaitTerminal: suspend () -> androidx.work.WorkInfo? = {
+                    val flow = attachmentWorkerCoordinator
+                        .workInfoFlow(java.util.UUID.fromString(record.workId))
+                        .filterNotNull()
+                    val firstInfo = withTimeoutOrNull(2_000L) { flow.first() }
+                    if (firstInfo == null) null else {
+                        activeAttachmentWorkState = firstInfo.state
+                        attachmentRepository.loadDescriptor(record.sessionId, record.attachmentId)?.let {
+                            activeAttachment = it
+                        }
+                        renderActiveAttachment()
+                        if (firstInfo.state.isFinished) firstInfo else flow.first { info ->
+                            activeAttachmentWorkState = info.state
+                            attachmentRepository.loadDescriptor(record.sessionId, record.attachmentId)?.let {
+                                activeAttachment = it
+                            }
+                            renderActiveAttachment()
+                            info.state.isFinished
+                        }
+                    }
+                }
+                val workInfo = if (record.operation == AttachmentWorkOperation.WHISPER_TRANSCRIPTION) {
+                    chatController?.withRuntimeLease { awaitTerminal() } ?: awaitTerminal()
+                } else {
+                    awaitTerminal()
+                }
+                if (workInfo == null) {
+                    attachmentRepository.deleteWorkRecord(record)
+                    activeAttachmentWork = null
+                    activeAttachmentWorkState = null
+                    attachmentImportInProgress = false
+                    showTransientMessage("The saved attachment job no longer exists.")
+                } else {
+                    finishAttachmentWork(record, workInfo)
+                }
+            } catch (_: CancellationException) {
+                // WorkManager owns the operation; a recreated Activity reconnects from the durable record.
+            } finally {
+                if (activeAttachmentWork?.workId == record.workId && activeAttachmentWorkState?.isFinished == true) {
+                    activeAttachmentWork = null
+                    attachmentImportInProgress = false
+                }
+                attachmentImportJob = null
+                renderActiveAttachment()
+            }
+        }
+    }
+
+    private fun finishAttachmentWork(record: AttachmentWorkRecord, workInfo: androidx.work.WorkInfo) {
+        var descriptor = attachmentRepository.loadDescriptor(record.sessionId, record.attachmentId)
+        val succeeded = workInfo.state == androidx.work.WorkInfo.State.SUCCEEDED &&
+            descriptor?.status == AttachmentStatus.READY
+        val errorMessage = workInfo.outputData.getString(AttachmentPreparationWorker.KEY_ERROR)
+            ?: descriptor?.errorMessage
+            ?: if (workInfo.state == androidx.work.WorkInfo.State.SUCCEEDED) {
+                "The attachment result could not be loaded."
+            } else null
+            ?: when (workInfo.state) {
+                androidx.work.WorkInfo.State.CANCELLED -> "Processing cancelled. Retry or detach the attachment."
+                else -> "Attachment processing failed."
+            }
+        if (!succeeded && descriptor != null) {
+            descriptor = AttachmentWorkPolicy.failedDescriptor(
+                descriptor,
+                record.operation,
+                errorMessage
+            ).also(attachmentRepository::saveDescriptor)
+        }
+        attachmentRepository.deleteWorkRecord(record)
+        activeAttachmentWorkState = workInfo.state
+        attachmentImportInProgress = false
+        activeAttachment = descriptor
+        descriptor?.let {
+            chatController?.restoreAttachmentSession(record.sessionId)
+            chatController?.setActiveAttachment(it.id)
+        }
+        if (!succeeded) {
+            showTransientMessage(errorMessage)
+        } else if (
+            descriptor?.kind == AttachmentKind.AUDIO &&
+            descriptor.status == AttachmentStatus.READY &&
+            !usesNativeAudioForSelectedModel() &&
+            record.operation == AttachmentWorkOperation.IMPORT
+        ) {
+            offerWhisperPreparation(descriptor)
+        }
+    }
+
+    private fun retryActiveAttachment() {
+        val descriptor = activeAttachment ?: return
+        if (activeAttachmentWork != null) return
+        val record = runCatching {
+            when (descriptor.retryOperation) {
+                AttachmentWorkOperation.IMPORT -> attachmentWorkerCoordinator.enqueueImportRetry(descriptor)
+                AttachmentWorkOperation.WHISPER_TRANSCRIPTION ->
+                    attachmentWorkerCoordinator.enqueueWhisper(descriptor.sessionId, descriptor.id)
+                null -> return
+            }
+        }.getOrElse { error ->
+            activeAttachment = descriptor.copy(
+                status = AttachmentStatus.FAILED,
+                updatedAtMillis = System.currentTimeMillis(),
+                errorMessage = error.message ?: "Attachment retry could not be started."
+            ).also(attachmentRepository::saveDescriptor)
+            renderActiveAttachment()
+            return
+        }
+        observeAttachmentWork(record)
+    }
+
+    private fun cancelAndForgetWork(record: AttachmentWorkRecord) {
+        attachmentWorkerCoordinator.cancel(java.util.UUID.fromString(record.workId))
+        attachmentRepository.deleteWorkRecord(record)
+        activeAttachmentWork = null
+        activeAttachmentWorkState = null
+    }
+
+    private fun prepareGemmaAudioAfterConfirmation(descriptor: AttachmentDescriptor) {
+        val segmentMillis = currentModel?.nativeAudioSegmentMillis ?: return
+        if (audioPreparationJob?.isActive == true) return
+        audioPreparationJob = lifecycleScope.launch {
+            try {
+                val segmented = withContext(Dispatchers.IO) {
+                    GemmaAudioSegmenter(applicationContext, segmentMillis).segment(descriptor)
+                }
+                preparedGemmaAudio = segmented
+                preparedGemmaAudioAttachmentId = descriptor.id
+            } catch (_: CancellationException) {
+                cleanupPreparedGemmaAudio()
+                return@launch
+            } catch (error: Throwable) {
+                cleanupPreparedGemmaAudio()
+                showTransientMessage(error.message ?: "Audio segmentation failed.")
+                return@launch
+            } finally {
+                audioPreparationJob = null
+            }
+            handleSendClick()
+        }
+    }
+
+    private fun cleanupPreparedGemmaAudio() {
+        preparedGemmaAudio?.temporaryFiles?.forEach { File(it).delete() }
+        preparedGemmaAudio = null
+        preparedGemmaAudioAttachmentId = null
+    }
+
+    private fun renderActiveAttachment() {
+        if (!::activeAttachmentContainer.isInitialized) return
+        val descriptor = activeAttachment
+        val compactReadyAudio = descriptor?.kind == AttachmentKind.AUDIO &&
+            descriptor.status == AttachmentStatus.READY &&
+            !attachmentImportInProgress
+        val containerParams = activeAttachmentContainer.layoutParams
+        containerParams.width = if (compactReadyAudio) {
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        } else {
+            ViewGroup.LayoutParams.MATCH_PARENT
+        }
+        activeAttachmentContainer.layoutParams = containerParams
+        val textParams = activeAttachmentText.layoutParams as LinearLayout.LayoutParams
+        textParams.width = if (compactReadyAudio) {
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        } else {
+            0
+        }
+        textParams.weight = if (compactReadyAudio) 0f else 1f
+        activeAttachmentText.layoutParams = textParams
+        activeAttachmentContainer.setBackgroundResource(
+            if (compactReadyAudio) R.drawable.bg_active_audio_attachment else R.drawable.bg_image_input_chip
+        )
+        activeAttachmentText.setTextColor(
+            if (compactReadyAudio) ContextCompat.getColor(this, R.color.white) else resolveThemeColor(R.attr.colorInputText)
+        )
+        activeAttachmentContainer.visibility = if (attachmentImportInProgress || descriptor != null) {
+            View.VISIBLE
+        } else {
+            View.GONE
+        }
+        activeAttachmentProgress.visibility = if (
+            attachmentImportInProgress || descriptor?.status == AttachmentStatus.PROCESSING || descriptor?.status == AttachmentStatus.IMPORTING
+        ) View.VISIBLE else View.GONE
+        activeAttachmentRetry.visibility = if (descriptor?.status == AttachmentStatus.FAILED) View.VISIBLE else View.GONE
+        activeAttachmentCancel.visibility = if (
+            attachmentImportInProgress || descriptor?.status == AttachmentStatus.PROCESSING || descriptor?.status == AttachmentStatus.IMPORTING
+        ) View.VISIBLE else View.GONE
+        activeAttachmentText.text = when {
+            attachmentImportInProgress && activeAttachmentWorkState in listOf(
+                androidx.work.WorkInfo.State.ENQUEUED,
+                androidx.work.WorkInfo.State.BLOCKED
+            ) -> getString(R.string.attachment_queued)
+            attachmentImportInProgress -> getString(R.string.attachment_importing)
+            descriptor == null -> ""
+            descriptor.status == AttachmentStatus.FAILED -> getString(
+                R.string.attachment_failed,
+                descriptor.errorMessage.orEmpty()
+            )
+            descriptor.status == AttachmentStatus.PROCESSING ->
+                getString(R.string.attachment_using, attachmentDisplayName(descriptor)) + " · " +
+                    if (activeAttachmentWorkState == androidx.work.WorkInfo.State.ENQUEUED) "Queued…" else "Transcribing…"
+            else -> getString(R.string.attachment_using, attachmentDisplayName(descriptor)) + " · " +
+                getString(R.string.attachment_ready)
+        }
+    }
+
+    private fun attachmentDisplayName(descriptor: AttachmentDescriptor): String = when (descriptor.kind) {
+        AttachmentKind.AUDIO -> getString(R.string.audio_attached)
+        else -> descriptor.displayName
+    }
+
+    private fun clearSpeechInputState() {
+        speechInput?.cancel()
+        updateMicRecordingState(false)
+        speechBasePromptText = ""
+        speechRecognizedText = ""
+        speechCommittedText = ""
+        speechPartialText = ""
+    }
+
+    private fun dp(value: Int): Int {
+        return (value * resources.displayMetrics.density).toInt()
+    }
+
+    private fun hasPermission(permission: String): Boolean {
+        return ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun observeController(controller: PersistentChatController) {
+        controllerStateJob?.cancel()
+        modelPreparationJob?.cancel()
+        controllerStateJob = lifecycleScope.launch {
+            controller.state.collect { state ->
+                reconcileModelLoadState(state)
+                applyChatState(state)
+            }
+        }
+    }
+
+    private fun observeModelDownloadState() {
+        modelDownloadStateJob?.cancel()
+        modelDownloadStateJob = lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                ModelDownloadStateStore.state.collect { state ->
+                    applyModelDownloadState(state)
+                }
+            }
+        }
+    }
+
+    private fun applyModelDownloadState(state: ModelDownloadState) {
+        when (state) {
+            ModelDownloadState.Idle -> {
+                if (activeDownloadModelId != null) {
+                    modelOperationStatusMessage = null
+                    resetDownloadState()
+                    refreshModelSelectionDialog()
+                    if (chatController != null) {
+                        applyChatState(chatController!!.state.value)
+                    } else {
+                        renderNoControllerState(getString(R.string.model_required_message), preserveTranscript = true)
+                    }
+                }
+            }
+
+            is ModelDownloadState.Running -> {
+                activeDownloadModelId = state.modelId
+                activeDownloadModelName = state.modelName
+                activeDownloadFileName = state.fileName
+                activeDownloadBytes = state.bytesDownloaded
+                activeDownloadTotalBytes = state.totalBytes
+                modelOperationStatusMessage = if (state.totalBytes != null && state.totalBytes > 0L) {
+                    getString(
+                        R.string.model_download_progress_status,
+                        state.modelName,
+                        formatFileSize(state.bytesDownloaded),
+                        formatFileSize(state.totalBytes)
+                    )
+                } else {
+                    getString(
+                        R.string.model_download_progress_status_unknown,
+                        state.modelName,
+                        formatFileSize(state.bytesDownloaded)
+                    )
+                }
+
+                refreshModelSelectionDialog()
+                if (chatController == null) {
+                    renderNoControllerState(modelOperationStatusMessage.orEmpty(), preserveTranscript = true)
+                }
+            }
+
+            is ModelDownloadState.Completed -> {
+                modelOperationStatusMessage = null
+                resetDownloadState()
+                refreshModelSelectionDialog()
+                if (chatController != null) {
+                    applyChatState(chatController!!.state.value)
+                } else {
+                    renderNoControllerState(getString(R.string.model_required_message), preserveTranscript = true)
+                }
+                showTransientMessage(getString(R.string.download_notification_complete, state.modelName))
+
+                ModelDownloadStateStore.clearTerminalState(state.modelId)
+            }
+
+            is ModelDownloadState.Failed -> {
+                modelOperationStatusMessage = null
+                resetDownloadState()
+                refreshModelSelectionDialog()
+                if (chatController != null) {
+                    applyChatState(chatController!!.state.value)
+                } else {
+                    renderNoControllerState(getString(R.string.model_required_message), preserveTranscript = false)
+                }
+                showTransientMessage(
+                    getString(
+                        R.string.model_download_failed_message,
+                        state.modelName,
+                        state.message
+                    )
+                )
+                ModelDownloadStateStore.clearTerminalState(state.modelId)
+            }
+        }
+    }
+
+    private fun switchToController(
+        descriptor: ModelDescriptor,
+        controller: PersistentChatController,
+        activeChatSnapshot: ActiveChatSnapshot? = null,
+        attempt: ModelLoadRecord? = null
+    ) {
+        controllerStateJob?.cancel()
+        if (currentModel?.id != descriptor.id && activeChatSnapshot == null) {
+            inputEditText.text.clear()
+            clearSpeechInputState()
+            clearPendingImageInputs()
+            activeAttachment = null
+            renderActiveAttachment()
+        }
+        chatController?.close()
+        chatController = controller
+        LanServerControllerRegistry.register(descriptor.id, controller)
+        currentModel = descriptor
+        ensureImageInputModeAllowedForCurrentModel()
+        retainedState.chatController = controller
+        retainedState.modelId = descriptor.id
+        modelSelectionStore.saveSelectedModel(descriptor.id)
+        modelOperationStatusMessage = null
+        autoScrollDuringGeneration = false
+        autoScrollPendingFinalUpdate = false
+        wasGenerating = false
+        toolbarSubtitleView.text = descriptor.displayName
+        updateModelSelectorLabel()
+        lastGemmaDirectImageInputAvailable = null
+        updateImageInputButtonDescriptions()
+        refreshDrawerSessions()
+        thinkingToggle.isChecked = false
+        observeController(controller)
+        applyChatState(controller.state.value)
+        if (attempt != null) {
+            if (controller.state.value.isReady) {
+                handleModelInitializationResult(descriptor, attempt, Result.success(Unit))
+            } else {
+                controller.initialize(activeChatSnapshot) { result ->
+                    handleModelInitializationResult(descriptor, attempt, result)
+                }
+            }
+        }
+    }
+
+    private val documentPickerLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri -> uri?.let { importAttachment(it, AttachmentKind.TEXT) } }
+
+    private val audioPickerLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri -> uri?.let { importAttachment(it, AttachmentKind.AUDIO) } }
+
+    private val customModelPickerLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri -> uri?.let(::importCustomModel) }
+
+    private fun showCustomModelWarning() {
+        val dialogBuilder = MaterialAlertDialogBuilder(this)
+        val warningView = LayoutInflater.from(dialogBuilder.context)
+            .inflate(R.layout.dialog_custom_model_warning, null)
+        val dialog = dialogBuilder
+            .setView(warningView)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton(R.string.custom_model_choose_file) { _, _ ->
+                customModelPickerLauncher.launch(arrayOf("*/*"))
+            }
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                ?.setTextColor(resolveThemeColor(R.attr.colorSendFill))
+            dialog.getButton(AlertDialog.BUTTON_NEGATIVE)
+                ?.setTextColor(resolveThemeColor(R.attr.colorStatusText))
+        }
+        dialog.show()
+    }
+
+    private fun importCustomModel(uri: Uri) {
+        val progress = MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.custom_model_add)
+            .setMessage(R.string.custom_model_importing)
+            .setCancelable(false)
+            .create()
+        progress.show()
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching { CustomLiteRtModelStore(this@ChatBotProActivity).import(uri) }
+            }
+            progress.dismiss()
+            result.fold(
+                onSuccess = { descriptor ->
+                    ModelRegistry.loadCustomModels(this@ChatBotProActivity)
+                    refreshModelSelectionDialog()
+                    handleModelSelection(descriptor)
+                },
+                onFailure = { error ->
+                    MaterialAlertDialogBuilder(this@ChatBotProActivity)
+                        .setTitle(R.string.custom_model_add)
+                        .setMessage(getString(R.string.custom_model_import_failed, error.message ?: "Unknown error"))
+                        .setPositiveButton(android.R.string.ok, null)
+                        .show()
+                }
+            )
+        }
+    }
+
+    private fun requestModelLoad(
+        descriptor: ModelDescriptor,
+        activeChatSnapshot: ActiveChatSnapshot?
+    ) {
+        modelPreparationJob?.cancel()
+        modelPreparationJob = lifecycleScope.launch {
+            val initialPreflight = withContext(Dispatchers.IO) {
+                modelPreflightChecker.checkLoad(descriptor, descriptor.approxDownloadBytes)
+            }
+            if (initialPreflight.kind == ModelPreflightKind.BLOCKED) {
+                recordPreflightFailure(descriptor, initialPreflight.message.orEmpty())
+                return@launch
+            }
+
+            val validation = withContext(Dispatchers.IO) { modelFileValidator.validate(descriptor) }
+            if (!validation.valid) {
+                recordPreflightFailure(
+                    descriptor,
+                    validation.message ?: getString(R.string.model_file_invalid_generic)
+                )
+                return@launch
+            }
+
+            val preflight = withContext(Dispatchers.IO) {
+                modelPreflightChecker.checkLoad(descriptor, validation.totalBytes)
+            }
+            if (preflight.kind == ModelPreflightKind.BLOCKED) {
+                recordPreflightFailure(descriptor, preflight.message.orEmpty())
+                return@launch
+            }
+            startPreparedModelLoad(
+                descriptor,
+                activeChatSnapshot,
+                BackendInitializationPolicy(allowCpuFallback = preflight.allowCpuFallback)
+            )
+        }
+    }
+
+    private fun startPreparedModelLoad(
+        descriptor: ModelDescriptor,
+        activeChatSnapshot: ActiveChatSnapshot?,
+        policy: BackendInitializationPolicy
+    ) {
+        cancelCurrentInitializationMarker()
+        val attempt = modelLoadCoordinator.begin(descriptor.id, System.currentTimeMillis())
+        persistModelLoadRecord()
+        retainedState.pendingModelLoadSnapshot = activeChatSnapshot
+        val controller = LanServerControllerRegistry.getOrCreate(this, descriptor, policy)
+        switchToController(descriptor, controller, activeChatSnapshot, attempt)
+    }
+
+    private fun handleModelInitializationResult(
+        descriptor: ModelDescriptor,
+        attempt: ModelLoadRecord,
+        result: Result<Unit>
+    ) {
+        if (isFinishing || isDestroyed) return
+        result.fold(
+            onSuccess = {
+                if (modelLoadCoordinator.succeed(descriptor.id, attempt.attemptId)) {
+                    persistModelLoadRecord()
+                }
+                retainedState.pendingModelLoadSnapshot = null
+            },
+            onFailure = { error ->
+                val reason = usefulModelLoadError(descriptor, error)
+                if (modelLoadCoordinator.fail(
+                        descriptor.id,
+                        attempt.attemptId,
+                        reason,
+                        System.currentTimeMillis()
+                    )
+                ) {
+                    persistModelLoadRecord()
+                    renderNoControllerState(reason, preserveTranscript = true)
+                    showModelRecoveryDialog()
+                }
+            }
+        )
+    }
+
+    private fun reconcileModelLoadState(state: ChatUiState) {
+        val descriptor = currentModel ?: return
+        val record = modelLoadCoordinator.record ?: return
+        if (record.modelId != descriptor.id || record.phase != ModelLoadPhase.INITIALIZING) return
+        when {
+            state.isReady -> {
+                if (modelLoadCoordinator.succeed(descriptor.id, record.attemptId)) {
+                    persistModelLoadRecord()
+                }
+                retainedState.pendingModelLoadSnapshot = null
+            }
+            !state.isLoading && state.statusMessage.startsWith("Error:") -> {
+                val reason = state.statusMessage.removePrefix("Error:").trim()
+                    .ifBlank { getString(R.string.model_load_failed_generic) }
+                if (modelLoadCoordinator.fail(descriptor.id, record.attemptId, reason, System.currentTimeMillis())) {
+                    persistModelLoadRecord()
+                    showModelRecoveryDialog()
+                }
+            }
+        }
+    }
+
+    private fun recordPreflightFailure(descriptor: ModelDescriptor, reason: String) {
+        cancelCurrentInitializationMarker()
+        val snapshot = chatController?.snapshotActiveChat()
+            ?: retainedState.pendingModelLoadSnapshot
+        controllerStateJob?.cancel()
+        chatController?.close()
+        chatController = null
+        retainedState.chatController = null
+        retainedState.pendingModelLoadSnapshot = snapshot
+        currentModel = descriptor
+        retainedState.modelId = descriptor.id
+        modelSelectionStore.saveSelectedModel(descriptor.id)
+        val attempt = modelLoadCoordinator.begin(descriptor.id, System.currentTimeMillis())
+        modelLoadCoordinator.fail(descriptor.id, attempt.attemptId, reason, System.currentTimeMillis())
+        persistModelLoadRecord()
+        toolbarSubtitleView.text = descriptor.displayName
+        renderNoControllerState(reason, preserveTranscript = true)
+        showModelRecoveryDialog()
+    }
+
+    private fun cancelCurrentInitializationMarker() {
+        val record = modelLoadCoordinator.record ?: return
+        if (record.phase != ModelLoadPhase.INITIALIZING) return
+        chatController?.cancelInitialization()
+        if (modelLoadCoordinator.cancel(record.modelId, record.attemptId)) {
+            persistModelLoadRecord()
+        }
+    }
+
+    private fun persistModelLoadRecord() {
+        modelLoadRecoveryStore.save(modelLoadCoordinator.record)
+    }
+
+    private fun usefulModelLoadError(descriptor: ModelDescriptor, error: Throwable): String {
+        val detail = error.message?.trim().orEmpty()
+        return if (detail.isBlank()) {
+            getString(R.string.model_load_failed_message, descriptor.displayName)
+        } else {
+            getString(R.string.model_load_failed_detail, descriptor.displayName, detail)
+        }
+    }
+
+    private fun applyChatState(state: ChatUiState) {
+        if (state.isReady) reconnectActiveAttachmentWorkIfNeeded()
+        restoreActiveAttachmentIfNeeded(state.activeAttachmentId)
+        val generationStarted = state.isGenerating && !wasGenerating
+        val generationFinished = !state.isGenerating && wasGenerating
+
+        if (generationStarted) {
+            autoScrollDuringGeneration = true
+            autoScrollPendingFinalUpdate = false
+        }
+        if (generationFinished) {
+            autoScrollPendingFinalUpdate = autoScrollDuringGeneration
+            autoScrollDuringGeneration = false
+        }
+
+        title = state.title
+        toolbarSubtitleView.text = currentModel?.displayName ?: getString(R.string.model_picker_empty_subtitle)
+        updateModelSelectorLabel()
+        thinkingToggleContainer.visibility = if (state.supportsThinking) View.VISIBLE else View.GONE
+        val gemmaDirectAvailable = isGemmaDirectImageInputAvailable()
+        if (!gemmaDirectAvailable && currentImageInputMode == ImageInputMode.GEMMA_DIRECT) {
+            selectOcrImageInputMode(resetGemmaDirectInputs = true)
+            updateModelSelectorLabel()
+        }
+        if (lastGemmaDirectImageInputAvailable != gemmaDirectAvailable) {
+            lastGemmaDirectImageInputAvailable = gemmaDirectAvailable
+            updateImageInputButtonDescriptions()
+            refreshModelSelectionDialog()
+        }
+        sendButton.visibility = if (state.isGenerating) View.GONE else View.VISIBLE
+        stopButton.visibility = if (state.isGenerating) View.VISIBLE else View.GONE
+        newChatButton.isEnabled = state.isReady && !state.isGenerating && !isImagePreprocessingForSend
+        sendButton.isEnabled = state.isReady && !state.isGenerating && !isImagePreprocessingForSend
+        attachmentButton.isEnabled = state.isReady && !state.isGenerating &&
+            !attachmentImportInProgress && audioPreparationJob?.isActive != true
+        stopButton.isEnabled = state.isGenerating
+
+        val effectiveStatus = if (state.isReady) {
+            state.statusMessage
+        } else {
+            modelOperationStatusMessage ?: state.statusMessage
+        }
+        statusView.text = effectiveStatus
+        val showInlineStatus = effectiveStatus.isNotBlank() &&
+            (state.transcript.isEmpty() || !state.isReady)
+        statusView.visibility = if (showInlineStatus) View.VISIBLE else View.GONE
+        applyStatusBackground(effectiveStatus)
+
+        chatAdapter.submitTurns(state.transcript)
+        wasGenerating = state.isGenerating
+        if (generationFinished) {
+            refreshDrawerSessions()
+        }
+    }
+
+    private fun renderNoControllerState(
+        message: String,
+        preserveTranscript: Boolean
+    ) {
+        title = getString(R.string.toolbar_app_title)
+        toolbarSubtitleView.text = currentModel?.displayName ?: getString(R.string.model_picker_empty_subtitle)
+        updateModelSelectorLabel()
+        thinkingToggleContainer.visibility = View.GONE
+        newChatButton.isEnabled = false
+        sendButton.visibility = View.VISIBLE
+        stopButton.visibility = View.GONE
+        sendButton.isEnabled = false
+        stopButton.isEnabled = false
+        statusView.text = message
+        statusView.visibility = if (message.isBlank()) View.GONE else View.VISIBLE
+        applyStatusBackground(message)
+        if (!preserveTranscript) {
+            chatAdapter.submitTurns(emptyList())
+        }
+        autoScrollDuringGeneration = false
+        autoScrollPendingFinalUpdate = false
+        wasGenerating = false
+    }
+
+    private fun updateModelSelectorLabel() {
+        if (!::selectedModelLabel.isInitialized) return
+        selectedModelLabel.text = currentModel?.displayName
+            ?: getString(R.string.model_picker_empty_subtitle)
+        toolbarModelSelector.contentDescription = getString(
+            R.string.model_popup_selected_format,
+            selectedModelLabel.text,
+            if (currentImageInputMode == ImageInputMode.GEMMA_DIRECT) {
+                getString(R.string.gemma_direct_image_model_name)
+            } else {
+                getString(R.string.ocr_image_model_name)
+            }
+        )
+    }
+
+    private fun showModelPickerPopup() {
+        modelPickerPopup?.dismiss()
+        val content = layoutInflater.inflate(R.layout.popup_model_picker, null)
+        val options: LinearLayout = content.findViewById(R.id.modelPickerOptions)
+        val scroll: ScrollView = content.findViewById(R.id.modelPickerScroll)
+        val manageLink: TextView = content.findViewById(R.id.modelPickerManageLink)
+        val panelWidth = minOf(dp(310), resources.displayMetrics.widthPixels - dp(24))
+        val popup = PopupWindow(content, panelWidth, ViewGroup.LayoutParams.WRAP_CONTENT, true).apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            isOutsideTouchable = true
+            elevation = dp(12).toFloat()
+        }
+        modelPickerPopup = popup
+        popup.setOnDismissListener {
+            if (modelPickerPopup === popup) modelPickerPopup = null
+        }
+        val mutedColor = resolveThemeColor(R.attr.colorStatusText)
+        val textColor = resolveThemeColor(R.attr.colorAssistantText)
+        val accentColor = resolveThemeColor(R.attr.colorSendFill)
+
+        fun addHeading(title: String) {
+            options.addView(TextView(this).apply {
+                text = title
+                setTextColor(mutedColor)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                setPadding(dp(8), dp(8), dp(8), dp(3))
+            })
+        }
+
+        fun addOption(label: String, selected: Boolean, enabled: Boolean = true, action: () -> Unit) {
+            val row = LinearLayout(this).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    dp(42)
+                )
+                gravity = Gravity.CENTER_VERTICAL
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(dp(8), 0, dp(8), 0)
+                isClickable = enabled
+                isFocusable = enabled
+                isEnabled = enabled
+                val ripple = TypedValue()
+                if (theme.resolveAttribute(android.R.attr.selectableItemBackground, ripple, true)) {
+                    setBackgroundResource(ripple.resourceId)
+                }
+                contentDescription = if (selected) {
+                    "$label, ${getString(R.string.model_status_current)}"
+                } else {
+                    label
+                }
+                if (enabled) setOnClickListener {
+                    popup.dismiss()
+                    action()
+                }
+            }
+            row.addView(TextView(this).apply {
+                text = label
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                setTextColor(if (!enabled) mutedColor else if (selected) accentColor else textColor)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            if (selected) {
+                row.addView(TextView(this).apply {
+                    text = "✓"
+                    setTextColor(accentColor)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                    setPadding(dp(8), 0, 0, 0)
+                })
+            }
+            options.addView(row)
+        }
+
+        val availableModels = ModelRegistry.all.filter(modelFileResolver::isModelAvailable)
+        addHeading(getString(R.string.model_popup_text_heading))
+        if (availableModels.isEmpty()) {
+            addOption(getString(R.string.model_popup_no_text), selected = false, enabled = false) {}
+        } else {
+            availableModels.forEach { descriptor ->
+                addOption(
+                    descriptor.displayName,
+                    selected = descriptor.id == currentModel?.id && chatController != null
+                ) { handleModelSelection(descriptor) }
+            }
+        }
+        addHeading(getString(R.string.model_popup_image_heading))
+        addOption(
+            getString(R.string.ocr_image_model_name),
+            selected = currentImageInputMode == ImageInputMode.OCR
+        ) { handleOcrImageModelSelection() }
+        if (isGemmaDirectImageInputSupportedBySelectedModel()) {
+            addOption(
+                getString(R.string.gemma_direct_image_model_name),
+                selected = currentImageInputMode == ImageInputMode.GEMMA_DIRECT,
+                enabled = isGemmaDirectImageInputAvailable()
+            ) { handleGemmaDirectImageModelSelection() }
+        }
+        manageLink.setOnClickListener {
+            popup.dismiss()
+            showManageModelsDialog()
+        }
+
+        val anchorLocation = IntArray(2)
+        toolbarModelSelector.getLocationOnScreen(anchorLocation)
+        val visibleFrame = Rect()
+        window.decorView.getWindowVisibleDisplayFrame(visibleFrame)
+        val spaceAbove = (anchorLocation[1] - visibleFrame.top - dp(12)).coerceAtLeast(dp(120))
+        val optionsWidth = panelWidth - dp(20)
+        options.measure(
+            View.MeasureSpec.makeMeasureSpec(optionsWidth, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+        )
+        scroll.layoutParams = scroll.layoutParams.apply {
+            height = minOf(options.measuredHeight, (spaceAbove - dp(64)).coerceAtLeast(dp(56)))
+        }
+        content.measure(
+            View.MeasureSpec.makeMeasureSpec(panelWidth, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+        )
+        popup.height = content.measuredHeight
+        val x = (anchorLocation[0] + toolbarModelSelector.width - panelWidth)
+            .coerceIn(dp(12), (resources.displayMetrics.widthPixels - panelWidth - dp(12)).coerceAtLeast(dp(12)))
+        val y = (anchorLocation[1] - popup.height - dp(6)).coerceAtLeast(visibleFrame.top + dp(4))
+        popup.showAtLocation(toolbarModelSelector, Gravity.TOP or Gravity.START, x, y)
+    }
+
+    private fun showManageModelsDialog() {
+        val existingDialog = modelDialogViews?.dialog
+        if (existingDialog != null && existingDialog.isShowing) {
+            refreshModelSelectionDialog()
+            return
+        }
+
+        val dialogBuilder = MaterialAlertDialogBuilder(this)
+        val dialogView = LayoutInflater.from(dialogBuilder.context)
+            .inflate(R.layout.dialog_model_selection, null)
+
+        val dialog = dialogBuilder
+            .setView(dialogView)
+            .create()
+
+        val dialogUi = ModelDialogViews(
+            dialog = dialog,
+            introView = dialogView.findViewById(R.id.modelPickerIntro),
+            listContainer = dialogView.findViewById(R.id.modelListContainer)
+        )
+
+        dialogView.findViewById<Button>(R.id.importLocalModelButton).setOnClickListener {
+            showCustomModelWarning()
+        }
+
+        dialog.setOnDismissListener {
+            modelDialogViews = null
+        }
+
+        modelDialogViews = dialogUi
+        refreshModelSelectionDialog()
+        dialog.show()
+    }
+
+    private fun showModelRecoveryDialog() {
+        val record = modelLoadCoordinator.record?.takeIf { it.phase == ModelLoadPhase.FAILED } ?: return
+        val descriptor = ModelRegistry.findById(record.modelId) ?: return
+        if (modelRecoveryDialog?.isShowing == true) return
+        val choices = arrayOf(
+            getString(R.string.model_recovery_choose_another),
+            getString(R.string.model_recovery_delete),
+            getString(R.string.model_recovery_retry),
+            getString(R.string.model_recovery_continue)
+        )
+        modelRecoveryDialog = MaterialAlertDialogBuilder(this)
+            .setTitle(getString(R.string.model_recovery_title))
+            .setMessage(
+                getString(
+                    if (record.failureReason?.contains("Some ops are not accelerated", ignoreCase = true) == true) {
+                        R.string.model_recovery_accelerator_message
+                    } else {
+                        R.string.model_recovery_message
+                    },
+                    descriptor.displayName,
+                    record.failureReason ?: getString(R.string.model_load_failed_generic)
+                )
+            )
+            .setItems(choices) { dialog, which ->
+                when (which) {
+                    0 -> {
+                        dialog.dismiss()
+                        showModelPickerPopup()
+                    }
+                    1 -> {
+                        dialog.dismiss()
+                        confirmDeleteModel(descriptor)
+                    }
+                    2 -> {
+                        dialog.dismiss()
+                        modelLoadCoordinator.clearForModel(descriptor.id)
+                        persistModelLoadRecord()
+                        requestModelLoad(
+                            descriptor,
+                            activeChatSnapshot = chatController?.snapshotActiveChat()
+                                ?: retainedState.pendingModelLoadSnapshot,
+                        )
+                    }
+                    3 -> {
+                        dialog.dismiss()
+                        detachFailedController(descriptor)
+                    }
+                }
+            }
+            .setOnDismissListener { modelRecoveryDialog = null }
+            .create()
+        modelRecoveryDialog?.show()
+    }
+
+    private fun detachFailedController(descriptor: ModelDescriptor) {
+        controllerStateJob?.cancel()
+        chatController?.close()
+        chatController = null
+        retainedState.chatController = null
+        retainedState.modelId = descriptor.id
+        currentModel = descriptor
+        renderNoControllerState(getString(R.string.model_recovery_continued), preserveTranscript = true)
+    }
+
+    private fun refreshModelSelectionDialog() {
+        val dialogUi = modelDialogViews ?: return
+        dialogUi.dialog.setCancelable(true)
+        dialogUi.dialog.setCanceledOnTouchOutside(true)
+        dialogUi.introView.text = getString(R.string.manage_models_intro)
+
+        dialogUi.listContainer.removeAllViews()
+        val inflater = LayoutInflater.from(this)
+        ModelRegistry.all.forEach { descriptor ->
+            addTextModelOption(inflater, dialogUi.listContainer, descriptor)
+        }
+    }
+
+    private fun addModelSectionHeader(container: LinearLayout, title: String) {
+        container.addView(
+            TextView(this).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    topMargin = dp(8)
+                    bottomMargin = dp(4)
+                }
+                text = title
+                setTextColor(resolveThemeColor(R.attr.colorStatusText))
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                letterSpacing = 0f
+            }
+        )
+    }
+
+    private fun addTextModelOption(
+        inflater: LayoutInflater,
+        container: LinearLayout,
+        descriptor: ModelDescriptor
+    ) {
+        addDownloadableModelOption(
+            inflater = inflater,
+            container = container,
+            descriptor = descriptor,
+            isCurrentModel = currentModel?.id == descriptor.id && chatController != null,
+            onUseModel = { handleModelSelection(descriptor) }
+        )
+    }
+
+    private fun addDownloadableModelOption(
+        inflater: LayoutInflater,
+        container: LinearLayout,
+        descriptor: ModelDescriptor,
+        isCurrentModel: Boolean,
+        onUseModel: () -> Unit
+    ) {
+        val itemView = inflater.inflate(R.layout.item_model_option, container, false)
+        val nameView: TextView = itemView.findViewById(R.id.modelName)
+        val metaView: TextView = itemView.findViewById(R.id.modelMeta)
+        val recommendationView: TextView = itemView.findViewById(R.id.modelRecommendation)
+        val statusTextView: TextView = itemView.findViewById(R.id.modelStatus)
+        val actionButton: Button = itemView.findViewById(R.id.modelActionButton)
+        val deleteButton: ImageButton = itemView.findViewById(R.id.modelDeleteButton)
+        val itemProgressBar: ProgressBar = itemView.findViewById(R.id.modelItemProgressBar)
+        val itemProgressText: TextView = itemView.findViewById(R.id.modelItemProgressText)
+
+        nameView.text = descriptor.displayName
+        val metaText = getString(
+            R.string.model_picker_meta_format,
+            descriptor.backendLabel,
+            descriptor.sizeLabel
+        )
+        metaView.text = metaText
+        val isDownloadingThisModel = activeDownloadModelId == descriptor.id
+        val isDownloaded = modelFileResolver.isModelDownloaded(descriptor)
+        val isAvailable = modelFileResolver.isModelAvailable(descriptor)
+
+        val statusText = when {
+            isDownloadingThisModel -> getString(R.string.model_status_downloading)
+            isCurrentModel -> getString(R.string.model_status_current)
+            isDownloaded -> getString(R.string.model_status_downloaded)
+            isAvailable -> getString(R.string.model_status_bundled)
+            else -> getString(R.string.model_status_not_downloaded)
+        }
+        statusTextView.text = statusText
+        recommendationView.text = getString(
+            R.string.model_picker_compact_detail_format,
+            descriptor.backendLabel,
+            descriptor.sizeLabel,
+            descriptor.deviceRecommendation,
+            statusText
+        )
+
+        actionButton.text = when {
+            isDownloadingThisModel -> getString(R.string.stop_download)
+            isCurrentModel -> getString(R.string.model_action_current)
+            isAvailable -> getString(R.string.model_action_use)
+            else -> getString(R.string.model_action_download)
+        }
+        actionButton.isEnabled = when {
+            isDownloadingThisModel -> true
+            isAvailable -> true
+            else -> activeDownloadModelId == null
+        }
+        actionButton.setOnClickListener {
+            if (isDownloadingThisModel) {
+                cancelModelDownload()
+            } else {
+                onUseModel()
+            }
+        }
+
+        val canDeleteDownloadedModel = isDownloaded && !isDownloadingThisModel
+        deleteButton.visibility = if (canDeleteDownloadedModel) View.VISIBLE else View.GONE
+        deleteButton.isEnabled = true
+        deleteButton.setOnClickListener {
+            confirmDeleteModel(descriptor)
+        }
+
+        itemProgressBar.visibility = if (isDownloadingThisModel) View.VISIBLE else View.GONE
+        updateProgressBar(itemProgressBar, activeDownloadBytes, activeDownloadTotalBytes)
+        itemProgressText.visibility = if (isDownloadingThisModel) View.VISIBLE else View.GONE
+        itemProgressText.text = formatDownloadProgressText(activeDownloadBytes, activeDownloadTotalBytes)
+
+        container.addView(itemView)
+    }
+
+    private fun addOcrImageModelOption(
+        inflater: LayoutInflater,
+        container: LinearLayout
+    ) {
+        val itemView = inflater.inflate(R.layout.item_model_option, container, false)
+        val nameView: TextView = itemView.findViewById(R.id.modelName)
+        val metaView: TextView = itemView.findViewById(R.id.modelMeta)
+        val recommendationView: TextView = itemView.findViewById(R.id.modelRecommendation)
+        val statusTextView: TextView = itemView.findViewById(R.id.modelStatus)
+        val actionButton: Button = itemView.findViewById(R.id.modelActionButton)
+        val deleteButton: ImageButton = itemView.findViewById(R.id.modelDeleteButton)
+        val itemProgressBar: ProgressBar = itemView.findViewById(R.id.modelItemProgressBar)
+        val itemProgressText: TextView = itemView.findViewById(R.id.modelItemProgressText)
+
+        val isCurrent = currentImageInputMode == ImageInputMode.OCR
+        val statusText = if (isCurrent) {
+            getString(R.string.model_status_current)
+        } else {
+            getString(R.string.model_status_bundled)
+        }
+
+        nameView.text = getString(R.string.ocr_image_model_name)
+        metaView.text = getString(R.string.ocr_image_model_meta)
+        statusTextView.text = statusText
+        recommendationView.text = getString(R.string.ocr_image_model_detail, statusText)
+        actionButton.text = if (isCurrent) {
+            getString(R.string.model_action_current)
+        } else {
+            getString(R.string.model_action_use)
+        }
+        actionButton.isEnabled = !isCurrent
+        actionButton.setOnClickListener {
+            handleOcrImageModelSelection()
+        }
+
+        deleteButton.visibility = View.GONE
+        itemProgressBar.visibility = View.GONE
+        itemProgressText.visibility = View.GONE
+
+        container.addView(itemView)
+    }
+
+    private fun addGemmaDirectImageModelOption(
+        inflater: LayoutInflater,
+        container: LinearLayout
+    ) {
+        val itemView = inflater.inflate(R.layout.item_model_option, container, false)
+        val nameView: TextView = itemView.findViewById(R.id.modelName)
+        val metaView: TextView = itemView.findViewById(R.id.modelMeta)
+        val recommendationView: TextView = itemView.findViewById(R.id.modelRecommendation)
+        val statusTextView: TextView = itemView.findViewById(R.id.modelStatus)
+        val actionButton: Button = itemView.findViewById(R.id.modelActionButton)
+        val deleteButton: ImageButton = itemView.findViewById(R.id.modelDeleteButton)
+        val itemProgressBar: ProgressBar = itemView.findViewById(R.id.modelItemProgressBar)
+        val itemProgressText: TextView = itemView.findViewById(R.id.modelItemProgressText)
+
+        val isAvailable = isGemmaDirectImageInputAvailable()
+        val isCurrent = currentImageInputMode == ImageInputMode.GEMMA_DIRECT && isAvailable
+        val statusText = when {
+            isCurrent -> getString(R.string.model_status_current)
+            isAvailable -> getString(R.string.model_status_bundled)
+            else -> getString(R.string.model_status_unavailable)
+        }
+
+        nameView.text = getString(R.string.gemma_direct_image_model_name)
+        metaView.text = getString(R.string.gemma_direct_image_model_meta)
+        statusTextView.text = statusText
+        recommendationView.text = getString(R.string.gemma_direct_image_model_detail, statusText)
+        actionButton.text = when {
+            isCurrent -> getString(R.string.model_action_current)
+            isAvailable -> getString(R.string.model_action_use)
+            else -> getString(R.string.model_action_unavailable)
+        }
+        actionButton.isEnabled = isAvailable && !isCurrent
+        actionButton.setOnClickListener {
+            handleGemmaDirectImageModelSelection()
+        }
+
+        deleteButton.visibility = View.GONE
+        itemProgressBar.visibility = View.GONE
+        itemProgressText.visibility = View.GONE
+
+        container.addView(itemView)
+    }
+
+    private fun configureDrawer() {
+        drawerSessionsAdapter = DrawerSessionsAdapter(
+            fontSizeSp = currentSettings.chatFontSizeSp,
+            onSessionSelected = { session ->
+                drawerLayout.closeDrawer(GravityCompat.START)
+                drawerLayout.post {
+                    val controller = requireUsableController()
+                    if (controller != null) {
+                        controller.loadSession(session.sessionId)
+                    }
+                }
+            },
+            onDeleteRequested = { session ->
+                confirmDeleteSession(session)
+            }
+        )
+        drawerChatsRecyclerView.layoutManager = LinearLayoutManager(this)
+        drawerChatsRecyclerView.adapter = drawerSessionsAdapter
+
+        findViewById<View>(R.id.drawerSettingsRow).setOnClickListener {
+            drawerLayout.closeDrawer(GravityCompat.START)
+            drawerLayout.post {
+                showSettingsDialog()
+            }
+        }
+
+        findViewById<View>(R.id.drawerLanServerRow).setOnClickListener {
+            drawerLayout.closeDrawer(GravityCompat.START)
+            drawerLayout.post {
+                showLanServerDialog()
+            }
+        }
+
+        findViewById<View>(R.id.drawerImagesRow).setOnClickListener {
+            drawerLayout.closeDrawer(GravityCompat.START)
+            drawerLayout.post {
+                showImageLibraryDialog()
+            }
+        }
+
+        findViewById<View>(R.id.drawerModelSettingsRow).setOnClickListener {
+            drawerLayout.closeDrawer(GravityCompat.START)
+            drawerLayout.post {
+                showModelSettingsDialog()
+            }
+        }
+
+        findViewById<View>(R.id.drawerManageModelsRow).setOnClickListener {
+            drawerLayout.closeDrawer(GravityCompat.START)
+            drawerLayout.post { showManageModelsDialog() }
+        }
+
+        findViewById<View>(R.id.drawerAboutRow).setOnClickListener {
+            drawerLayout.closeDrawer(GravityCompat.START)
+            drawerLayout.post {
+                showAboutDialog()
+            }
+        }
+    }
+
+    private fun showLanServerDialog() {
+        val dialogBuilder = MaterialAlertDialogBuilder(this)
+        val dialogView = LayoutInflater.from(dialogBuilder.context)
+            .inflate(R.layout.dialog_lan_server, null)
+        val statusView: TextView = dialogView.findViewById(R.id.lanServerStatus)
+        val endpointView: TextView = dialogView.findViewById(R.id.lanServerEndpoint)
+        val apiEndpointView: TextView = dialogView.findViewById(R.id.lanServerApiEndpoint)
+        val copyApiUrlLink: TextView = dialogView.findViewById(R.id.lanServerCopyApiUrlLink)
+        val passwordInput: EditText = dialogView.findViewById(R.id.lanServerPasswordInput)
+        val passwordVisibilityButton: ImageButton = dialogView.findViewById(R.id.lanServerPasswordVisibilityButton)
+        val savePasswordButton: MaterialButton = dialogView.findViewById(R.id.lanServerSavePasswordButton)
+        val copyUrlLink: TextView = dialogView.findViewById(R.id.lanServerCopyUrlLink)
+        val startButton: MaterialButton = dialogView.findViewById(R.id.lanServerStartButton)
+        val closeButton: MaterialButton = dialogView.findViewById(R.id.lanServerCloseButton)
+        var savedPassword = LanServerStateStore.getPassword(this)
+        var passwordVisible = false
+        passwordInput.setText(savedPassword.orEmpty())
+        passwordInput.hint = if (LanServerStateStore.hasPassword(this)) {
+            getString(R.string.lan_server_password_change_hint)
+        } else {
+            getString(R.string.lan_server_password_hint)
+        }
+        copyUrlLink.paintFlags = copyUrlLink.paintFlags or Paint.UNDERLINE_TEXT_FLAG
+        copyApiUrlLink.paintFlags = copyApiUrlLink.paintFlags or Paint.UNDERLINE_TEXT_FLAG
+        val dialog = dialogBuilder
+            .setView(dialogView)
+            .create()
+
+        fun renderState() {
+            val storedState = LanServerStateStore.read(this)
+            if (storedState.isActive && !LanServerService.isRunning()) {
+                LanServerStateStore.markStopped(this)
+            }
+            val state = LanServerStateStore.read(this)
+            statusView.text = when (state.status) {
+                LanServerStatus.STOPPED -> getString(R.string.lan_server_status_stopped)
+                LanServerStatus.STARTING -> getString(R.string.lan_server_status_starting)
+                LanServerStatus.RUNNING -> getString(R.string.lan_server_status_running)
+                LanServerStatus.FAILED -> getString(R.string.lan_server_status_failed) +
+                    ": " + state.errorMessage.orEmpty()
+            }
+            endpointView.text = state.endpoint ?: "—"
+            apiEndpointView.text = state.endpoint?.let(::lanApiBaseUrl) ?: "—"
+            val modelReady = chatController?.state?.value?.isReady == true
+            closeButton.isEnabled = state.isActive
+            closeButton.alpha = if (state.isActive) 1f else 0.4f
+            startButton.isEnabled = !state.isActive && modelReady &&
+                LanServerStateStore.hasPassword(this) &&
+                passwordInput.text.toString() == savedPassword.orEmpty()
+            val webUiAvailable = state.status == LanServerStatus.RUNNING && !state.endpoint.isNullOrBlank()
+            copyUrlLink.isEnabled = webUiAvailable
+            copyApiUrlLink.isEnabled = webUiAvailable
+            passwordInput.isEnabled = !state.isActive
+            savePasswordButton.visibility = if (!state.isActive &&
+                passwordInput.text.toString() != savedPassword.orEmpty()
+            ) View.VISIBLE else View.GONE
+        }
+
+        passwordVisibilityButton.setOnClickListener {
+            passwordVisible = !passwordVisible
+            passwordInput.transformationMethod = if (passwordVisible) {
+                HideReturnsTransformationMethod.getInstance()
+            } else {
+                PasswordTransformationMethod.getInstance()
+            }
+            passwordInput.setSelection(passwordInput.text.length)
+            passwordVisibilityButton.setImageResource(
+                if (passwordVisible) R.drawable.ic_visibility_off else R.drawable.ic_visibility
+            )
+            passwordVisibilityButton.contentDescription = getString(
+                if (passwordVisible) R.string.lan_server_hide_password else R.string.lan_server_show_password
+            )
+        }
+        passwordInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = renderState()
+            override fun afterTextChanged(s: Editable?) = Unit
+        })
+        savePasswordButton.setOnClickListener {
+            val password = passwordInput.text.toString()
+            if (password.length < LanServerStateStore.MIN_PASSWORD_LENGTH) {
+                showTransientMessage(getString(
+                    R.string.lan_server_password_too_short,
+                    LanServerStateStore.MIN_PASSWORD_LENGTH
+                ))
+                return@setOnClickListener
+            }
+            if (runCatching { LanServerStateStore.setPassword(this, password) }.isFailure) {
+                showTransientMessage(getString(R.string.lan_server_password_save_failed))
+                return@setOnClickListener
+            }
+            savedPassword = password
+            renderState()
+        }
+
+        val refreshRunnable = object : Runnable {
+            override fun run() {
+                if (!dialog.isShowing) return
+                renderState()
+                dialogView.postDelayed(this, 500L)
+            }
+        }
+
+        startButton.setOnClickListener {
+            val model = currentModel
+            val controller = chatController
+            if (model == null || controller?.state?.value?.isReady != true) {
+                showTransientMessage(getString(R.string.model_required_message))
+                return@setOnClickListener
+            }
+            if (controller.state.value.isGenerating) {
+                showTransientMessage(getString(R.string.lan_server_generation_blocked))
+                return@setOnClickListener
+            }
+            if (passwordInput.text.toString() != savedPassword.orEmpty()) {
+                showTransientMessage(getString(R.string.lan_server_password_save_first))
+                return@setOnClickListener
+            }
+            if (!LanServerStateStore.hasPassword(this)) {
+                showTransientMessage(getString(R.string.lan_server_password_required))
+                return@setOnClickListener
+            }
+            LanServerControllerRegistry.register(model.id, controller)
+            LanServerService.start(this, model.id)
+            renderState()
+        }
+        copyUrlLink.setOnClickListener {
+            val endpoint = LanServerStateStore.read(this).endpoint
+            if (endpoint.isNullOrBlank()) {
+                showTransientMessage(getString(R.string.lan_server_not_running))
+                return@setOnClickListener
+            }
+            getSystemService(ClipboardManager::class.java)?.setPrimaryClip(
+                ClipData.newPlainText(getString(R.string.lan_server_url_label), endpoint)
+            )
+            showTransientMessage(getString(R.string.lan_server_url_copied))
+        }
+        copyApiUrlLink.setOnClickListener {
+            val apiEndpoint = LanServerStateStore.read(this).endpoint?.let(::lanApiBaseUrl)
+            if (apiEndpoint.isNullOrBlank()) {
+                showTransientMessage(getString(R.string.lan_server_not_running))
+                return@setOnClickListener
+            }
+            getSystemService(ClipboardManager::class.java)?.setPrimaryClip(
+                ClipData.newPlainText(getString(R.string.lan_server_api_url_label), apiEndpoint)
+            )
+            showTransientMessage(getString(R.string.lan_server_api_url_copied))
+        }
+        closeButton.setOnClickListener {
+            if (LanServerStateStore.read(this).isActive) {
+                LanServerService.stop(this)
+            }
+            dialog.dismiss()
+        }
+        dialog.setOnShowListener {
+            renderState()
+            dialogView.post(refreshRunnable)
+        }
+        dialog.setOnDismissListener {
+            dialogView.removeCallbacks(refreshRunnable)
+        }
+        dialog.show()
+        renderState()
+    }
+
+    private fun lanApiBaseUrl(webUiUrl: String): String {
+        val normalized = webUiUrl.trimEnd('/')
+        return if (normalized.endsWith("/ui")) {
+            normalized.removeSuffix("/ui") + "/v1"
+        } else {
+            "$normalized/v1"
+        }
+    }
+
+    private fun refreshDrawerSessions() {
+        if (!::drawerSessionsAdapter.isInitialized) {
+            return
+        }
+
+        val sessions = chatSessionStore.list()
+        drawerSessionsAdapter.submitList(sessions)
+        drawerChatsEmptyView.visibility = if (sessions.isEmpty()) View.VISIBLE else View.GONE
+    }
+
+    private fun confirmDeleteSession(session: ChatSessionSummary) {
+        val dialog = MaterialAlertDialogBuilder(this)
+            .setTitle(getString(R.string.delete_chat))
+            .setMessage(getString(R.string.delete_chat_confirmation))
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton(getString(R.string.delete)) { _, _ ->
+                val deleted = chatController?.deleteSession(session.sessionId)
+                    ?: chatSessionStore.delete(session.sessionId)
+                if (deleted) {
+                    refreshDrawerSessions()
+                    showTransientMessage(getString(R.string.chat_deleted))
+                }
+            }
+            .create()
+
+        dialog.setOnShowListener {
+            applyDeleteConfirmationButtonColors(dialog)
+        }
+        dialog.show()
+    }
+
+    private fun showImageLibraryDialog() {
+        val dialogBuilder = MaterialAlertDialogBuilder(this)
+        val dialogView = LayoutInflater.from(dialogBuilder.context)
+            .inflate(R.layout.dialog_image_library, null)
+        val subtitleView: TextView = dialogView.findViewById(R.id.imageLibrarySubtitle)
+        val emptyView: TextView = dialogView.findViewById(R.id.imageLibraryEmpty)
+        val recyclerView: RecyclerView = dialogView.findViewById(R.id.imageLibraryRecyclerView)
+        val closeButton: Button = dialogView.findViewById(R.id.imageLibraryCloseButton)
+        val deleteButton: Button = dialogView.findViewById(R.id.imageLibraryDeleteButton)
+        val images = savedImageStore.list()
+        val spanCount = ((resources.displayMetrics.widthPixels / resources.displayMetrics.density) / 120f)
+            .toInt()
+            .coerceAtLeast(2)
+
+        val dialog = dialogBuilder
+            .setView(dialogView)
+            .create()
+        val gridAdapter = SavedImageGridAdapter(
+            fontSizeSp = currentSettings.chatFontSizeSp,
+            onOpenImage = { image ->
+                dialog.dismiss()
+                openImageViewer(image.filePath)
+            },
+            onSelectionChanged = { selectedCount ->
+                subtitleView.text = if (selectedCount > 0) {
+                    getString(R.string.image_library_selection_count, selectedCount)
+                } else {
+                    getString(R.string.image_library_hint)
+                }
+                deleteButton.isEnabled = selectedCount > 0
+                deleteButton.text = if (selectedCount > 0) {
+                    getString(R.string.delete_selected_images_count, selectedCount)
+                } else {
+                    getString(R.string.delete_selected_images)
+                }
+            }
+        )
+
+        recyclerView.layoutManager = GridLayoutManager(this, spanCount)
+        recyclerView.adapter = gridAdapter
+        gridAdapter.submitImages(images)
+        emptyView.visibility = if (images.isEmpty()) View.VISIBLE else View.GONE
+        recyclerView.visibility = if (images.isEmpty()) View.GONE else View.VISIBLE
+
+        closeButton.setOnClickListener {
+            dialog.dismiss()
+        }
+        deleteButton.setOnClickListener {
+            val selectedIds = gridAdapter.selectedIds()
+            if (selectedIds.isEmpty()) {
+                return@setOnClickListener
+            }
+            confirmDeleteSavedImages(selectedIds, dialog)
+        }
+
+        showPanelDialog(dialog)
+    }
+
+    private fun confirmDeleteSavedImages(
+        imageIds: Set<String>,
+        parentDialog: AlertDialog? = null
+    ) {
+        if (isImagePreprocessingForSend && pendingImageInputs.any { it.savedImageId in imageIds }) {
+            showTransientMessage(getString(R.string.image_input_processing))
+            return
+        }
+
+        val confirmationMessage = if (imageIds.size == 1) {
+            getString(R.string.delete_image_confirmation)
+        } else {
+            getString(R.string.delete_images_confirmation, imageIds.size)
+        }
+        val dialog = MaterialAlertDialogBuilder(this)
+            .setTitle(getString(R.string.delete_image))
+            .setMessage(confirmationMessage)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton(getString(R.string.delete)) { _, _ ->
+                parentDialog?.dismiss()
+                deleteSavedImages(imageIds)
+            }
+            .create()
+
+        dialog.setOnShowListener {
+            applyDeleteConfirmationButtonColors(dialog)
+        }
+        dialog.show()
+    }
+
+    private fun deleteSavedImages(imageIds: Set<String>) {
+        imageIds.forEach(::removePendingInputsForSavedImage)
+        val deletedCount = imageIds.count { imageId -> savedImageStore.delete(imageId) }
+        if (deletedCount <= 0) {
+            return
+        }
+
+        chatController?.let { applyChatState(it.state.value) }
+        chatAdapter.notifyDataSetChanged()
+        showTransientMessage(
+            if (deletedCount == 1) {
+                getString(R.string.image_deleted)
+            } else {
+                getString(R.string.images_deleted, deletedCount)
+            }
+        )
+    }
+
+    private fun removePendingInputsForSavedImage(imageId: String) {
+        val removedInputs = pendingImageInputs
+            .filter { it.savedImageId == imageId }
+            .toList()
+        if (removedInputs.isEmpty()) {
+            return
+        }
+
+        removedInputs.forEach { input ->
+            deletePendingImageTempFile(input)
+        }
+        pendingImageInputs.removeAll { it.savedImageId == imageId }
+        renderPendingImageInputs()
+    }
+
+    private fun openImageViewer(imagePath: String) {
+        val imageFile = File(imagePath)
+        if (!imageFile.exists()) {
+            showTransientMessage(getString(R.string.saved_image_missing))
+            return
+        }
+
+        startActivity(
+            Intent(this, ImageViewerActivity::class.java)
+                .putExtra(ImageViewerActivity.EXTRA_IMAGE_PATH, imagePath)
+        )
+    }
+
+    private fun confirmDeleteModel(descriptor: ModelDescriptor) {
+        val isFailedModel = modelLoadCoordinator.record?.let {
+            it.modelId == descriptor.id && it.phase == ModelLoadPhase.FAILED
+        } == true
+        if (currentModel?.id == descriptor.id && !isFailedModel) {
+            showTransientMessage(getString(R.string.delete_model_current_blocked))
+            return
+        }
+        if (activeDownloadModelId == descriptor.id) {
+            showTransientMessage(getString(R.string.model_download_delete_blocked))
+            return
+        }
+
+        val dialog = MaterialAlertDialogBuilder(this)
+            .setTitle(getString(R.string.delete_model))
+            .setMessage(getString(R.string.delete_model_confirmation, descriptor.displayName))
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton(getString(R.string.delete)) { _, _ ->
+                if (modelFileResolver.deleteDownloadedModel(descriptor)) {
+                    if (descriptor is CustomLiteRtSpec) ModelRegistry.loadCustomModels(this)
+                    if (isFailedModel) {
+                        controllerStateJob?.cancel()
+                        chatController?.close()
+                        chatController = null
+                        retainedState.chatController = null
+                        retainedState.modelId = null
+                        currentModel = null
+                        modelSelectionStore.clearSelectedModel()
+                        modelLoadCoordinator.clearForModel(descriptor.id)
+                        persistModelLoadRecord()
+                        renderNoControllerState(getString(R.string.model_required_message), preserveTranscript = true)
+                    }
+                    refreshModelSelectionDialog()
+                    showTransientMessage(getString(R.string.model_deleted_message, descriptor.displayName))
+                } else {
+                    showTransientMessage(getString(R.string.delete_model_failed, descriptor.displayName))
+                }
+            }
+            .create()
+
+        dialog.setOnShowListener {
+            applyDeleteConfirmationButtonColors(dialog)
+        }
+        dialog.show()
+    }
+
+    private fun applyDeleteConfirmationButtonColors(dialog: AlertDialog) {
+        dialog.getButton(AlertDialog.BUTTON_NEGATIVE)
+            ?.setTextColor(resolveThemeColor(R.attr.colorStatusText))
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+            ?.setTextColor(ContextCompat.getColor(this, R.color.delete_red))
+    }
+
+    private fun handleModelSelection(descriptor: ModelDescriptor) {
+        if (descriptor.id == currentModel?.id && chatController != null) {
+            modelDialogViews?.dialog?.dismiss()
+            return
+        }
+
+        val isAvailable = modelFileResolver.isModelAvailable(descriptor)
+        if (isAvailable) {
+            if (LanServerService.isRunning()) {
+                showTransientMessage(getString(R.string.lan_server_model_switch_blocked))
+                return
+            }
+            if (chatController?.state?.value?.isGenerating == true ||
+                isImagePreprocessingForSend || attachmentImportInProgress ||
+                audioPreparationJob?.isActive == true
+            ) {
+                showTransientMessage(getString(R.string.model_switch_generation_blocked))
+                return
+            }
+            ensureImageInputModeAllowedForModel(descriptor)
+            modelDialogViews?.dialog?.dismiss()
+            requestModelLoad(descriptor, activeChatSnapshot = null)
+            return
+        }
+
+        if (activeDownloadModelId != null) {
+            showTransientMessage(getString(R.string.model_download_already_running))
+            return
+        }
+
+        startModelDownload(descriptor)
+    }
+
+    private fun handleOcrImageModelSelection() {
+        if (chatController?.state?.value?.isGenerating == true || isImagePreprocessingForSend) {
+            showTransientMessage(getString(R.string.model_switch_generation_blocked))
+            return
+        }
+        selectOcrImageInputMode(resetGemmaDirectInputs = true)
+        updateModelSelectorLabel()
+        refreshModelSelectionDialog()
+        dismissModelDialogAfterImageSelectionIfAllowed()
+        showTransientMessage(getString(R.string.ocr_image_model_selected))
+    }
+
+    private fun handleGemmaDirectImageModelSelection() {
+        if (chatController?.state?.value?.isGenerating == true || isImagePreprocessingForSend) {
+            showTransientMessage(getString(R.string.model_switch_generation_blocked))
+            return
+        }
+        if (!isGemmaDirectImageInputAvailable()) {
+            showTransientMessage(getString(R.string.gemma_direct_image_model_unavailable))
+            return
+        }
+
+        currentImageInputMode = ImageInputMode.GEMMA_DIRECT
+        modelSelectionStore.saveSelectedImageInputMode(ImageInputMode.GEMMA_DIRECT)
+        updateImageInputButtonDescriptions()
+        updateModelSelectorLabel()
+        refreshModelSelectionDialog()
+        dismissModelDialogAfterImageSelectionIfAllowed()
+        showTransientMessage(getString(R.string.gemma_direct_image_model_selected))
+    }
+
+    private fun dismissModelDialogAfterImageSelectionIfAllowed() {
+        modelDialogViews?.dialog?.dismiss()
+    }
+
+    private fun updateImageInputButtonDescriptions() {
+        if (!::galleryOcrButton.isInitialized || !::cameraOcrButton.isInitialized) {
+            return
+        }
+
+        when (currentImageInputMode) {
+            ImageInputMode.OCR -> {
+                galleryOcrButton.contentDescription = getString(R.string.gallery_ocr_input)
+                cameraOcrButton.contentDescription = getString(R.string.camera_ocr_input)
+            }
+            ImageInputMode.GEMMA_DIRECT -> {
+                galleryOcrButton.contentDescription = getString(R.string.gallery_gemma_direct_input)
+                cameraOcrButton.contentDescription = getString(R.string.camera_gemma_direct_input)
+            }
+        }
+    }
+
+    private fun startModelDownload(descriptor: ModelDescriptor) {
+        if (activeDownloadModelId != null) {
+            showTransientMessage(getString(R.string.model_download_already_running))
+            return
+        }
+
+        val preflight = modelPreflightChecker.checkDownload(descriptor)
+        if (preflight.kind == ModelPreflightKind.BLOCKED) {
+            showTransientMessage(preflight.message ?: getString(R.string.model_download_storage_blocked))
+            return
+        }
+
+        activeDownloadModelId = descriptor.id
+        activeDownloadModelName = descriptor.displayName
+        activeDownloadFileName = null
+        activeDownloadBytes = 0L
+        activeDownloadTotalBytes = descriptor.approxDownloadBytes
+        modelOperationStatusMessage = getString(R.string.model_download_preparing, descriptor.displayName)
+
+        refreshModelSelectionDialog()
+        if (chatController != null) {
+            applyChatState(chatController!!.state.value)
+        } else {
+            renderNoControllerState(modelOperationStatusMessage.orEmpty(), preserveTranscript = true)
+        }
+
+        requestDownloadNotificationPermissionIfNeeded()
+        runCatching {
+            ModelDownloadService.start(this, descriptor)
+        }.onFailure { error ->
+            Log.w(TAG, "Failed to start model download service.", error)
+            modelOperationStatusMessage = null
+            resetDownloadState()
+            refreshModelSelectionDialog()
+            if (chatController != null) {
+                applyChatState(chatController!!.state.value)
+            } else {
+                renderNoControllerState(getString(R.string.model_required_message), preserveTranscript = true)
+            }
+            showTransientMessage(
+                getString(
+                    R.string.model_download_failed_message,
+                    descriptor.displayName,
+                    error.message ?: getString(R.string.model_download_failed_generic)
+                )
+            )
+        }
+    }
+
+    private fun cancelModelDownload() {
+        modelOperationStatusMessage = getString(R.string.model_download_cancelling)
+        refreshModelSelectionDialog()
+        if (chatController != null) {
+            applyChatState(chatController!!.state.value)
+        } else {
+            renderNoControllerState(modelOperationStatusMessage.orEmpty(), preserveTranscript = true)
+        }
+        ModelDownloadService.cancel(this)
+    }
+
+    private fun requestDownloadNotificationPermissionIfNeeded() {
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            !hasPermission(Manifest.permission.POST_NOTIFICATIONS)
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    private fun resetDownloadState() {
+        activeDownloadModelId = null
+        activeDownloadModelName = null
+        activeDownloadFileName = null
+        activeDownloadBytes = 0L
+        activeDownloadTotalBytes = null
+    }
+
+    private fun startNewChatFromUi() {
+        if (isImagePreprocessingForSend || attachmentImportInProgress || audioPreparationJob?.isActive == true) {
+            showTransientMessage(getString(R.string.image_input_processing))
+            return
+        }
+
+        val controller = requireUsableController() ?: return
+        if (controller.state.value.isGenerating) {
+            return
+        }
+
+        inputEditText.text.clear()
+        clearSpeechInputState()
+        clearPendingImageInputs()
+        activeAttachment = null
+        renderActiveAttachment()
+        controller.startNewChat()
+        refreshDrawerSessions()
+    }
+
+    private fun showSettingsDialog() {
+        val dialogBuilder = MaterialAlertDialogBuilder(this)
+        val dialogContext = dialogBuilder.context
+        val dialogView = LayoutInflater.from(dialogContext)
+            .inflate(R.layout.dialog_settings, null)
+        val previewState = settingsDialogPreviewState
+        val originalSettings = previewState?.originalSettings ?: currentSettings
+        var draftSettings = previewState?.draftSettings ?: currentSettings
+        val accentOptions = AppAccentOption.entries.toList()
+        val appearanceModeGroup: RadioGroup = dialogView.findViewById(R.id.appearanceModeGroup)
+        val accentColorSpinner: AppCompatSpinner = dialogView.findViewById(R.id.accentColorSpinner)
+        val fontSizeValue: TextView = dialogView.findViewById(R.id.fontSizeValue)
+        val fontSizePreview: TextView = dialogView.findViewById(R.id.fontSizePreview)
+        val fontSizeSeekBar: SeekBar = dialogView.findViewById(R.id.fontSizeSeekBar)
+        val cancelButton: Button = dialogView.findViewById(R.id.settingsCancelButton)
+        val saveButton: Button = dialogView.findViewById(R.id.settingsSaveButton)
+
+        val accentAdapter = ArrayAdapter(
+            dialogContext,
+            R.layout.item_instruction_preset_spinner,
+            accentOptions.map { dialogContext.getString(it.labelResId) }
+        ).apply {
+            setDropDownViewResource(R.layout.item_instruction_preset_dropdown)
+        }
+        accentColorSpinner.adapter = accentAdapter
+
+        when (draftSettings.appearance) {
+            AppAppearanceMode.LIGHT -> appearanceModeGroup.check(R.id.appearanceLight)
+            AppAppearanceMode.DARK -> appearanceModeGroup.check(R.id.appearanceDark)
+        }
+        val initialAccentIndex = accentOptions.indexOf(draftSettings.accent).coerceAtLeast(0)
+        accentColorSpinner.setSelection(initialAccentIndex, false)
+
+        val initialProgress = (draftSettings.chatFontSizeSp - 13f).toInt().coerceIn(0, 11)
+        fontSizeSeekBar.progress = initialProgress
+        updateFontSizePreview(fontSizeValue, fontSizePreview, draftSettings.chatFontSizeSp)
+
+        appearanceModeGroup.setOnCheckedChangeListener { _, checkedId ->
+            val selectedAppearance = when (checkedId) {
+                R.id.appearanceLight -> AppAppearanceMode.LIGHT
+                else -> AppAppearanceMode.DARK
+            }
+            if (draftSettings.appearance == selectedAppearance) {
+                return@setOnCheckedChangeListener
+            }
+            draftSettings = draftSettings.copy(appearance = selectedAppearance)
+            previewSettingsFromDialog(originalSettings, draftSettings)
+        }
+
+        var ignoreInitialAccentSelection = true
+        accentColorSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(
+                parent: AdapterView<*>?,
+                view: View?,
+                position: Int,
+                id: Long
+            ) {
+                if (ignoreInitialAccentSelection && position == initialAccentIndex) {
+                    ignoreInitialAccentSelection = false
+                    return
+                }
+                ignoreInitialAccentSelection = false
+                val selectedAccent = accentOptions.getOrNull(position) ?: return
+                if (draftSettings.accent == selectedAccent) {
+                    return
+                }
+                draftSettings = draftSettings.copy(accent = selectedAccent)
+                previewSettingsFromDialog(originalSettings, draftSettings)
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
+
+        fontSizeSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                val updatedFontSize = 13f + progress
+                draftSettings = draftSettings.copy(chatFontSizeSp = updatedFontSize)
+                updateFontSizePreview(fontSizeValue, fontSizePreview, updatedFontSize)
+            }
+
+            override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
+
+            override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
+        })
+
+        val dialog = dialogBuilder
+            .setView(dialogView)
+            .create()
+        var saveConfirmed = false
+
+        cancelButton.setOnClickListener {
+            dialog.dismiss()
+        }
+
+        dialog.setOnDismissListener {
+            if (!saveConfirmed && !isRecreatingForSettingsPreview && !isChangingConfigurations) {
+                rollbackSettingsPreviewIfNeeded()
+            }
+        }
+
+        saveButton.setOnClickListener {
+            val selectedAccent = accentOptions
+                .getOrNull(accentColorSpinner.selectedItemPosition)
+                ?: draftSettings.accent
+            val updatedSettings = draftSettings.copy(
+                accent = selectedAccent,
+                chatFontSizeSp = 13f + fontSizeSeekBar.progress
+            )
+            val visualThemeChanged = updatedSettings.accent != currentSettings.accent ||
+                updatedSettings.appearance != currentSettings.appearance
+            saveConfirmed = true
+            settingsDialogPreviewState = null
+            currentSettings = updatedSettings
+            settingsStore.save(updatedSettings)
+            dialog.dismiss()
+            if (visualThemeChanged) {
+                recreate()
+            } else {
+                chatAdapter.updateFontSize(updatedSettings.chatFontSizeSp)
+                drawerSessionsAdapter.updateFontSize(updatedSettings.chatFontSizeSp)
+                applyTypography(
+                    findViewById(R.id.statusView),
+                    findViewById(R.id.sendButton),
+                    findViewById(R.id.stopButton)
+                )
+            }
+        }
+
+        showPanelDialog(dialog)
+    }
+
+    private fun showAboutDialog() {
+        val dialogBuilder = MaterialAlertDialogBuilder(this)
+        val dialogView = LayoutInflater.from(dialogBuilder.context)
+            .inflate(R.layout.dialog_about, null)
+        val versionView: TextView = dialogView.findViewById(R.id.aboutVersion)
+        val githubLinkView: TextView = dialogView.findViewById(R.id.aboutGithubLink)
+        val privacyLinkView: TextView = dialogView.findViewById(R.id.aboutPrivacyLink)
+        val termsLinkView: TextView = dialogView.findViewById(R.id.aboutTermsLink)
+        val okButton: Button = dialogView.findViewById(R.id.aboutOkButton)
+        privacyLinkView.setOnClickListener {
+            LegalDialogs.showDocument(this, LegalDocument.PRIVACY_POLICY)
+        }
+        termsLinkView.setOnClickListener {
+            LegalDialogs.showDocument(this, LegalDocument.TERMS_OF_USE)
+        }
+
+        versionView.text = getString(R.string.about_version_format, currentVersionName())
+        githubLinkView.movementMethod = LinkMovementMethod.getInstance()
+        Linkify.addLinks(githubLinkView, Linkify.WEB_URLS)
+
+        val dialog = dialogBuilder
+            .setView(dialogView)
+            .create()
+
+        okButton.setOnClickListener {
+            dialog.dismiss()
+        }
+
+        showPanelDialog(dialog)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun currentVersionName(): String {
+        return runCatching {
+            packageManager.getPackageInfo(packageName, 0).versionName
+                ?.takeIf { it.isNotBlank() }
+                ?: "unknown"
+        }.getOrDefault("unknown")
+    }
+
+    private fun showModelSettingsDialog() {
+        val selectedModel = currentModel?.takeIf(modelFileResolver::isModelAvailable)
+        if (selectedModel != null) {
+            showModelSettingsDialog(selectedModel)
+            return
+        }
+
+        val availableModels = ModelRegistry.all.filter(modelFileResolver::isModelAvailable)
+        if (availableModels.isEmpty()) {
+            MaterialAlertDialogBuilder(this)
+                .setTitle(R.string.model_settings_title)
+                .setMessage(R.string.model_settings_no_models)
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton(R.string.manage_models) { _, _ -> showManageModelsDialog() }
+                .show()
+            return
+        }
+
+        if (availableModels.size == 1) {
+            showModelSettingsDialog(availableModels.single())
+            return
+        }
+
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.model_settings_choose_model)
+            .setItems(availableModels.map { it.displayName }.toTypedArray()) { _, index ->
+                showModelSettingsDialog(availableModels[index])
+            }
+            .show()
+    }
+
+    private fun showModelSettingsDialog(descriptor: ModelDescriptor) {
+        val editingActiveModel = currentModel?.id == descriptor.id && chatController != null
+
+        if (editingActiveModel && chatController?.state?.value?.isGenerating == true) {
+            showTransientMessage(getString(R.string.model_settings_generation_blocked))
+            return
+        }
+
+        if (editingActiveModel && LanServerService.isRunning()) {
+            showTransientMessage(getString(R.string.model_settings_lan_blocked))
+            return
+        }
+
+        if (!modelFileResolver.isModelAvailable(descriptor)) {
+            showTransientMessage(getString(R.string.model_settings_download_required))
+            return
+        }
+
+        val dialogBuilder = MaterialAlertDialogBuilder(this)
+        val dialogView = LayoutInflater.from(dialogBuilder.context)
+            .inflate(R.layout.dialog_model_settings, null)
+        val modelNameView: TextView = dialogView.findViewById(R.id.modelSettingsModelName)
+        val contextLengthInput: EditText = dialogView.findViewById(R.id.modelContextLengthInput)
+        val contextLengthHelp: TextView = dialogView.findViewById(R.id.modelContextLengthHelp)
+        val presetSpinner: AppCompatSpinner = dialogView.findViewById(R.id.modelInstructionPresetSpinner)
+        val instructionInput: EditText = dialogView.findViewById(R.id.modelInstructionInput)
+        val cancelButton: Button = dialogView.findViewById(R.id.modelSettingsCancelButton)
+        val saveButton: Button = dialogView.findViewById(R.id.modelSettingsSaveButton)
+
+        modelNameView.text = descriptor.displayName
+        val runtimeSettings = modelRuntimeSettingsStore.load(descriptor)
+        val minContextLength = ModelRuntimeSettingsLimits.minFor(descriptor)
+        val maxContextLength = ModelRuntimeSettingsLimits.maxFor(descriptor)
+        contextLengthInput.setText(runtimeSettings.contextLengthTokens.toString())
+        contextLengthInput.setSelection(contextLengthInput.text.length)
+        contextLengthHelp.text = getString(
+            R.string.model_context_length_help,
+            minContextLength,
+            maxContextLength
+        )
+        val presets = InstructionPreset.entries.toList()
+        val presetLabels = presets.map { it.label }
+        val presetAdapter = ArrayAdapter(
+            this,
+            R.layout.item_instruction_preset_spinner,
+            presetLabels
+        ).apply {
+            setDropDownViewResource(R.layout.item_instruction_preset_dropdown)
+        }
+        presetSpinner.adapter = presetAdapter
+
+        var selectedPreset = modelInstructionStore.loadPreset(descriptor)
+        var applyingPresetText = false
+        var switchingToCustomFromEdit = false
+
+        val currentInstruction = modelInstructionStore.loadInstruction(descriptor)
+        val selectedPresetIndex = presets.indexOf(selectedPreset).coerceAtLeast(0)
+        var customInstructionText = if (selectedPreset == InstructionPreset.CUSTOM) {
+            currentInstruction
+        } else {
+            InstructionPreset.CUSTOM.instruction
+        }
+        var ignoreInitialPresetSelection = true
+        presetSpinner.setSelection(selectedPresetIndex, false)
+        applyingPresetText = true
+        instructionInput.setText(currentInstruction)
+        instructionInput.setSelection(currentInstruction.length)
+        applyingPresetText = false
+
+        presetSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(
+                parent: AdapterView<*>?,
+                view: View?,
+                position: Int,
+                id: Long
+            ) {
+                val preset = presets.getOrNull(position) ?: return
+                if (ignoreInitialPresetSelection && position == selectedPresetIndex) {
+                    ignoreInitialPresetSelection = false
+                    return
+                }
+                ignoreInitialPresetSelection = false
+                selectedPreset = preset
+                if (switchingToCustomFromEdit) {
+                    return
+                }
+
+                applyingPresetText = true
+                val presetInstruction = if (preset == InstructionPreset.CUSTOM) {
+                    customInstructionText
+                } else {
+                    preset.instruction
+                }
+                instructionInput.setText(presetInstruction)
+                instructionInput.setSelection(instructionInput.text.length)
+                applyingPresetText = false
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
+
+        instructionInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(
+                text: CharSequence?,
+                start: Int,
+                count: Int,
+                after: Int
+            ) = Unit
+
+            override fun onTextChanged(
+                text: CharSequence?,
+                start: Int,
+                before: Int,
+                count: Int
+            ) = Unit
+
+            override fun afterTextChanged(text: Editable?) {
+                if (applyingPresetText) {
+                    return
+                }
+
+                val editedInstruction = text?.toString().orEmpty()
+                if (selectedPreset == InstructionPreset.CUSTOM) {
+                    customInstructionText = editedInstruction
+                    return
+                }
+
+                if (editedInstruction.trim() == selectedPreset.instruction) {
+                    return
+                }
+
+                customInstructionText = editedInstruction
+                selectedPreset = InstructionPreset.CUSTOM
+                val customPresetIndex = presets.indexOf(InstructionPreset.CUSTOM)
+                if (presetSpinner.selectedItemPosition != customPresetIndex) {
+                    switchingToCustomFromEdit = true
+                    presetSpinner.setSelection(customPresetIndex)
+                    switchingToCustomFromEdit = false
+                }
+            }
+        })
+
+        val dialog = dialogBuilder
+            .setView(dialogView)
+            .create()
+
+        fun saveModelSettings(
+            instruction: String,
+            presetToSave: InstructionPreset,
+            requestedContextLength: Int
+        ) {
+            modelInstructionStore.saveInstruction(descriptor, instruction, presetToSave)
+            val updatedRuntimeSettings = modelRuntimeSettingsStore.save(
+                descriptor,
+                ModelRuntimeSettings(requestedContextLength)
+            )
+            val runtimeSettingsChanged =
+                updatedRuntimeSettings.contextLengthTokens != runtimeSettings.contextLengthTokens
+            dialog.dismiss()
+            if (runtimeSettingsChanged) {
+                if (editingActiveModel) {
+                    showTransientMessage(getString(R.string.model_context_length_saved))
+                    reloadCurrentModelAfterRuntimeSettings()
+                } else {
+                    showTransientMessage(getString(R.string.model_settings_saved))
+                }
+            } else {
+                showTransientMessage(getString(R.string.model_instruction_saved))
+            }
+        }
+
+        cancelButton.setOnClickListener {
+            dialog.dismiss()
+        }
+
+        saveButton.setOnClickListener {
+            val instruction = instructionInput.text.toString().trim()
+            if (instruction.isBlank()) {
+                showTransientMessage(getString(R.string.model_instruction_empty))
+                return@setOnClickListener
+            }
+
+            val requestedContextLength = contextLengthInput.text.toString().trim().toIntOrNull()
+            if (
+                requestedContextLength == null ||
+                requestedContextLength !in minContextLength..maxContextLength
+            ) {
+                showTransientMessage(
+                    getString(
+                        R.string.model_context_length_invalid,
+                        minContextLength,
+                        maxContextLength
+                    )
+                )
+                return@setOnClickListener
+            }
+
+            val presetToSave = if (
+                selectedPreset != InstructionPreset.CUSTOM &&
+                instruction != selectedPreset.instruction
+            ) {
+                InstructionPreset.CUSTOM
+            } else {
+                selectedPreset
+            }
+
+            if (ModelRuntimeSettingsLimits.requiresMemoryWarning(requestedContextLength)) {
+                val warningDialog = MaterialAlertDialogBuilder(this)
+                    .setTitle(R.string.model_context_length_warning_title)
+                    .setMessage(
+                        getString(
+                            R.string.model_context_length_warning_message,
+                            ModelRuntimeSettingsLimits.HIGH_CONTEXT_WARNING_THRESHOLD,
+                            requestedContextLength
+                        )
+                    )
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .setPositiveButton(R.string.model_context_length_warning_continue) { _, _ ->
+                        saveModelSettings(instruction, presetToSave, requestedContextLength)
+                    }
+                    .create()
+                warningDialog.setOnShowListener {
+                    warningDialog.findViewById<TextView>(androidx.appcompat.R.id.alertTitle)
+                        ?.setTextColor(ContextCompat.getColor(this, R.color.delete_red))
+                    warningDialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                        ?.setTextColor(resolveThemeColor(R.attr.colorAssistantText))
+                }
+                warningDialog.show()
+            } else {
+                saveModelSettings(instruction, presetToSave, requestedContextLength)
+            }
+        }
+
+        showPanelDialog(dialog)
+    }
+
+    private fun reloadCurrentModelAfterRuntimeSettings() {
+        val descriptor = currentModel ?: return
+        val controller = chatController ?: return
+        val activeChatSnapshot = controller.snapshotActiveChat()
+        controllerStateJob?.cancel()
+        LanServerControllerRegistry.clearIf(controller)
+        chatController = null
+        retainedState.chatController = null
+        controller.close()
+        renderNoControllerState(getString(R.string.model_loading_message), preserveTranscript = true)
+        requestModelLoad(descriptor, activeChatSnapshot)
+    }
+
+    private fun showPanelDialog(dialog: AlertDialog) {
+        dialog.show()
+        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+    }
+
+    private fun previewSettingsFromDialog(
+        originalSettings: AppSettings,
+        draftSettings: AppSettings
+    ) {
+        settingsDialogPreviewState = SettingsDialogPreviewState(
+            originalSettings = originalSettings,
+            draftSettings = draftSettings
+        )
+        val previewThemeSettings = settingsDialogPreviewState?.previewThemeSettings() ?: return
+        val visualThemeChanged = previewThemeSettings.accent != currentSettings.accent ||
+            previewThemeSettings.appearance != currentSettings.appearance
+        if (!visualThemeChanged) {
+            return
+        }
+        currentSettings = previewThemeSettings
+        isRecreatingForSettingsPreview = true
+        recreate()
+    }
+
+    private fun rollbackSettingsPreviewIfNeeded() {
+        val previewState = settingsDialogPreviewState ?: return
+        settingsDialogPreviewState = null
+        reopenSettingsDialogOnStart = false
+        val originalSettings = previewState.originalSettings
+        val visualThemeChanged = currentSettings.accent != originalSettings.accent ||
+            currentSettings.appearance != originalSettings.appearance
+        currentSettings = originalSettings
+        if (visualThemeChanged) {
+            recreate()
+        }
+    }
+
+    private fun restoreSettingsDialogPreviewState(savedInstanceState: Bundle?): SettingsDialogPreviewState? {
+        savedInstanceState ?: return null
+        val originalSettings = restoreAppSettings(savedInstanceState, SETTINGS_STATE_ORIGINAL_PREFIX)
+            ?: return null
+        val draftSettings = restoreAppSettings(savedInstanceState, SETTINGS_STATE_DRAFT_PREFIX)
+            ?: return null
+        return SettingsDialogPreviewState(
+            originalSettings = originalSettings,
+            draftSettings = draftSettings
+        )
+    }
+
+    private fun saveAppSettings(
+        outState: Bundle,
+        prefix: String,
+        settings: AppSettings
+    ) {
+        outState.putString("${prefix}_accent", settings.accent.name)
+        outState.putString("${prefix}_appearance", settings.appearance.name)
+        outState.putFloat("${prefix}_font_size", settings.chatFontSizeSp)
+    }
+
+    private fun restoreAppSettings(savedInstanceState: Bundle, prefix: String): AppSettings? {
+        val accentName = savedInstanceState.getString("${prefix}_accent") ?: return null
+        val appearanceName = savedInstanceState.getString("${prefix}_appearance") ?: return null
+        return AppSettings(
+            accent = AppAccentOption.fromStoredName(accentName),
+            appearance = runCatching {
+                AppAppearanceMode.valueOf(appearanceName)
+            }.getOrDefault(AppAppearanceMode.DARK),
+            chatFontSizeSp = savedInstanceState
+                .getFloat("${prefix}_font_size", 16f)
+                .coerceIn(13f, 24f)
+        )
+    }
+
+    private fun resolveThemeColor(attrId: Int): Int {
+        val typedValue = TypedValue()
+        theme.resolveAttribute(attrId, typedValue, true)
+        return typedValue.data
+    }
+
+    private fun applyTypography(
+        statusView: TextView,
+        sendButton: Button,
+        stopButton: Button
+    ) {
+        inputEditText.textSize = currentSettings.chatFontSizeSp
+        statusView.textSize = currentSettings.chatFontSizeSp
+        transientMessageView.textSize = (currentSettings.chatFontSizeSp - 1f).coerceAtLeast(12f)
+        sendButton.textSize = (currentSettings.chatFontSizeSp - 1f).coerceAtLeast(12f)
+        stopButton.textSize = (currentSettings.chatFontSizeSp - 1f).coerceAtLeast(12f)
+    }
+
+    private fun updateFontSizePreview(
+        fontSizeValue: TextView,
+        fontSizePreview: TextView,
+        fontSizeSp: Float
+    ) {
+        fontSizeValue.text = "${fontSizeSp.toInt()} sp"
+        fontSizePreview.textSize = fontSizeSp
+    }
+
+    private fun updateProgressBar(
+        progressBar: ProgressBar,
+        downloadedBytes: Long,
+        totalBytes: Long?
+    ) {
+        if (totalBytes == null || totalBytes <= 0L) {
+            progressBar.isIndeterminate = true
+            return
+        }
+
+        progressBar.isIndeterminate = false
+        progressBar.max = 1000
+        progressBar.progress = ((downloadedBytes * 1000L) / totalBytes)
+            .toInt()
+            .coerceIn(0, 1000)
+    }
+
+    private fun formatDownloadProgressText(downloadedBytes: Long, totalBytes: Long?): String {
+        return if (totalBytes != null && totalBytes > 0L) {
+            getString(
+                R.string.model_download_progress_bytes,
+                formatFileSize(downloadedBytes),
+                formatFileSize(totalBytes)
+            )
+        } else {
+            getString(
+                R.string.download_notification_progress_unknown,
+                formatFileSize(downloadedBytes)
+            )
+        }
+    }
+
+    private fun formatFileSize(sizeBytes: Long): String {
+        return Formatter.formatFileSize(this, sizeBytes)
+    }
+
+    private fun applyStatusBackground(message: String) {
+        val backgroundRes = when (message) {
+            MODEL_LOADING_STATUS_MESSAGE -> R.drawable.bg_status_loading
+            MODEL_READY_STATUS_MESSAGE -> R.drawable.bg_status_ready
+            else -> R.drawable.bg_status_chip
+        }
+        statusView.setBackgroundResource(backgroundRes)
+    }
+
+    private fun updateMicRecordingState(active: Boolean) {
+        if (!::micInputButton.isInitialized) {
+            return
+        }
+
+        val backgroundColor = if (active) {
+            resolveThemeColor(R.attr.colorStopFill)
+        } else {
+            resolveThemeColor(R.attr.colorFrameBackground)
+        }
+        val strokeColor = if (active) {
+            resolveThemeColor(R.attr.colorStopStroke)
+        } else {
+            resolveThemeColor(R.attr.colorSendStroke)
+        }
+        val iconColor = if (active) {
+            ContextCompat.getColor(this, R.color.white)
+        } else {
+            resolveThemeColor(R.attr.colorAssistantText)
+        }
+
+        micInputButton.isSelected = active
+        micInputButton.backgroundTintList = ColorStateList.valueOf(backgroundColor)
+        micInputButton.strokeColor = ColorStateList.valueOf(strokeColor)
+        micInputButton.iconTint = ColorStateList.valueOf(iconColor)
+    }
+
+    private fun showTransientMessage(message: String) {
+        if (message.isBlank() || !::transientMessageView.isInitialized || isDestroyed) {
+            return
+        }
+
+        transientMessageView.removeCallbacks(hideTransientMessageRunnable)
+        transientMessageView.text = message
+        transientMessageView.visibility = View.VISIBLE
+        transientMessageView.bringToFront()
+        transientMessageView.postDelayed(hideTransientMessageRunnable, 1300L)
+    }
+
+    private fun scrollChatToBottomIfNeeded() {
+        if (!autoScrollDuringGeneration && !autoScrollPendingFinalUpdate) {
+            return
+        }
+
+        // Keep streamed output anchored to the bottom until the user takes control.
+        chatRecyclerView.post {
+            if (!autoScrollDuringGeneration && !autoScrollPendingFinalUpdate) {
+                return@post
+            }
+
+            val lastPosition = chatAdapter.itemCount - 1
+            if (lastPosition >= 0) {
+                val remainingScroll = (
+                    chatRecyclerView.computeVerticalScrollRange() -
+                        chatRecyclerView.computeVerticalScrollExtent() -
+                        chatRecyclerView.computeVerticalScrollOffset()
+                    ).coerceAtLeast(0)
+                if (remainingScroll > 0) {
+                    chatRecyclerView.scrollBy(0, remainingScroll)
+                }
+            }
+
+            if (!autoScrollDuringGeneration) {
+                autoScrollPendingFinalUpdate = false
+            }
+        }
+    }
+}
