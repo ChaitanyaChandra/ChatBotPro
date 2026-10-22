@@ -6,8 +6,7 @@ import android.net.Uri
 /**
  * On-device text recognition backend.
  *
- * The GitHub build provides a top-level `createOcrEngine(context, statusListener)`
- * using Google ML Kit (src/mlkit).
+ * `createOcrEngine(context, statusListener)` provides the Google ML Kit backend.
  */
 interface OcrEngine {
     /**

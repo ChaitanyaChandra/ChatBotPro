@@ -16,22 +16,22 @@ by Dinesh Soudagar (MIT licensed — see `NOTICE.md`).
 - Optional LAN web interface served from the phone
 - Bundled Terms of Use and Privacy Policy
 
-## Distribution
+## Build
 
-The app is distributed as a GitHub Release APK and uses Google ML Kit for
-on-device text recognition.
+The app has no product flavors: it uses the standard debug and release build
+types. It uses Google ML Kit for on-device text recognition.
 
 Build the release APK:
 
 ```sh
-./gradlew :app:assembleGithubRelease
+./gradlew :app:assembleRelease
 ```
 
 For local testing, a debug build installs alongside the release under the
 application ID `org.chaitu.chatbotpro.debug`:
 
 ```sh
-./gradlew :app:assembleGithubDebug
+./gradlew :app:assembleDebug
 ```
 
 ## Requirements
@@ -43,10 +43,10 @@ application ID `org.chaitu.chatbotpro.debug`:
 Unit tests:
 
 ```sh
-./gradlew :app:testGithubDebugUnitTest
+./gradlew :app:testDebugUnitTest
 ```
 
-Build outputs are written to `app/build/outputs/apk/github/`.
+Build outputs are written to `app/build/outputs/apk/release/`.
 
 ## Toolchain
 

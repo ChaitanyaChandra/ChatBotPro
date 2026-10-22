@@ -29,26 +29,11 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "LITERT_LM_RUNTIME_VERSION", "\"$liteRtLmVersion\"")
+        buildConfigField("String", "DISTRIBUTION_CHANNEL", "\"github\"")
         manifestPlaceholders["appLabel"] = "ChatBotPro"
     }
 
-    // Single distribution channel: free APK on GitHub Releases.
-    flavorDimensions += "store"
-    productFlavors {
-        create("github") {
-            dimension = "store"
-            buildConfigField("String", "DISTRIBUTION_CHANNEL", "\"github\"")
-        }
-    }
-
-    // OCR: the GitHub build uses the Google ML Kit implementation in src/mlkit.
-    // Register the shared Kotlin OCR sources with both the Java and Kotlin source sets.
-    sourceSets {
-        getByName("github") {
-            java.srcDir("src/mlkit/java")
-            kotlin.srcDir("src/mlkit/java")
-        }
-    }
+    // No product flavors: standard debug and release builds only.
 
     buildTypes {
         release {
@@ -122,7 +107,8 @@ dependencies {
     implementation("androidx.camera:camera-camera2:1.4.2")
     implementation("androidx.camera:camera-lifecycle:1.4.2")
     implementation("androidx.camera:camera-view:1.4.2")
-    "githubImplementation"("com.google.mlkit:text-recognition:16.0.1")
+    // Google ML Kit on-device OCR.
+    implementation("com.google.mlkit:text-recognition:16.0.1")
     implementation("com.google.ai.edge.litertlm:litertlm-android:$liteRtLmVersion")
     implementation("com.tom-roush:pdfbox-android:2.0.27.0")
     implementation("androidx.work:work-runtime-ktx:2.11.2")
