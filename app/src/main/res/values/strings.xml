@@ -153,7 +153,7 @@
     <string name="model_context_length_help">Higher values retain more chat history but use more memory. Allowed range: %1$d–%2$d tokens. The model may need to reload after this changes.</string>
     <string name="model_context_length_invalid">Enter a context length from %1$d to %2$d tokens.</string>
     <string name="model_context_length_warning_title">Large context may exceed device memory</string>
-    <string name="model_context_length_warning_message">You are saving a %2$d-token context. Values above %1$d tokens can use substantially more RAM and graphics memory, slow the device, fail to load, or crash the native runtime. The safe limit depends on this device and model. Save this value anyway?</string>
+    <string name="model_context_length_warning_message">You are saving a %1$d-token context. Values above %2$d tokens can use substantially more RAM and graphics memory, slow the device, fail to load, or crash the native runtime. The safe limit depends on this device and model. Save this value anyway?</string>
     <string name="model_context_length_warning_continue">Save anyway</string>
     <string name="model_context_length_saved">Model settings saved. Reloading the model…</string>
     <string name="model_settings_lan_blocked">Stop the LAN server before applying model runtime settings.</string>

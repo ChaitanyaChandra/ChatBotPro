@@ -4823,10 +4823,10 @@ open class ChatBotProActivity : AppCompatActivity() {
                 return@setOnClickListener
             }
 
-            val requestedContextLength = contextLengthInput.text.toString().trim().toIntOrNull()
+            val requestedContextLengthInput = contextLengthInput.text.toString().trim().toIntOrNull()
             if (
-                requestedContextLength == null ||
-                requestedContextLength !in minContextLength..maxContextLength
+                requestedContextLengthInput == null ||
+                requestedContextLengthInput !in minContextLength..maxContextLength
             ) {
                 showTransientMessage(
                     getString(
@@ -4837,6 +4837,7 @@ open class ChatBotProActivity : AppCompatActivity() {
                 )
                 return@setOnClickListener
             }
+            val requestedContextLength: Int = requestedContextLengthInput
 
             val presetToSave = if (
                 selectedPreset != InstructionPreset.CUSTOM &&
@@ -4853,8 +4854,8 @@ open class ChatBotProActivity : AppCompatActivity() {
                     .setMessage(
                         getString(
                             R.string.model_context_length_warning_message,
-                            ModelRuntimeSettingsLimits.HIGH_CONTEXT_WARNING_THRESHOLD,
-                            requestedContextLength
+                            requestedContextLength,
+                            ModelRuntimeSettingsLimits.HIGH_CONTEXT_WARNING_THRESHOLD
                         )
                     )
                     .setNegativeButton(android.R.string.cancel, null)
