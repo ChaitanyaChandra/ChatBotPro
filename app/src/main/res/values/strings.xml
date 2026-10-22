@@ -126,8 +126,8 @@
     <string name="about">About</string>
     <string name="about_title">About</string>
     <string name="about_version_format">Version %1$s</string>
-    <string name="about_github_url">https://ai.chaitu.net</string>
-    <string name="about_github_link">Website : https://ai.chaitu.net</string>
+    <string name="about_github_url">https://github.com/chaitanyachandra</string>
+    <string name="about_github_link">Website : https://chaitu.net</string>
     <string name="model_settings">Model Settings</string>
     <string name="model_settings_choose_model">Choose a model to configure</string>
     <string name="model_settings_no_models">Download a model before changing its context length or instructions.</string>

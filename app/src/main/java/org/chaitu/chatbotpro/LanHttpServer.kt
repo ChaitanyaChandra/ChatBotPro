@@ -63,6 +63,8 @@ class LanHttpServer(
         private const val MAX_IMAGE_UPLOAD_BYTES = 12 * 1024 * 1024
         private const val REQUEST_TIMEOUT_MS = 5 * 60 * 1000
         private const val SESSION_TTL_MS = 12 * 60 * 60 * 1000L
+        private const val LOGO_MAX_DIMENSION = 256
+        private const val LOGO_JPEG_QUALITY = 90
 
 
         private val STATUS_REASONS = mapOf(
@@ -90,11 +92,23 @@ class LanHttpServer(
     private val webUiHtml: String = context.assets.open("lan_ui.html")
         .bufferedReader(StandardCharsets.UTF_8).use { it.readText() }
     private val logoBytes: ByteArray = runCatching {
-        val bitmap = BitmapFactory.decodeResource(context.resources, R.mipmap.ic_launcher)
-            ?: BitmapFactory.decodeResource(context.resources, R.mipmap.ic_launcher_round)
-        val stream = ByteArrayOutputStream()
-        bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)
-        stream.toByteArray()
+        // R.mipmap.ic_launcher is an adaptive-icon XML on API 26+, which
+        // BitmapFactory cannot decode. Use the underlying drawable instead.
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeResource(context.resources, R.drawable.logo, bounds)
+        var sampleSize = 1
+        while (maxOf(bounds.outWidth, bounds.outHeight) / (sampleSize * 2) >= LOGO_MAX_DIMENSION) {
+            sampleSize *= 2
+        }
+        val bitmap = BitmapFactory.decodeResource(
+            context.resources,
+            R.drawable.logo,
+            BitmapFactory.Options().apply { inSampleSize = sampleSize }
+        ) ?: return@runCatching ByteArray(0)
+        ByteArrayOutputStream().use { stream ->
+            bitmap.compress(Bitmap.CompressFormat.JPEG, LOGO_JPEG_QUALITY, stream)
+            stream.toByteArray()
+        }
     }.getOrDefault(ByteArray(0))
     @Volatile
     private var serverSocket: ServerSocket? = null
@@ -174,8 +188,12 @@ class LanHttpServer(
                 writeHtml(writer, 200, webUiHtml)
                 return
             }
-            if (requestParts[0] == "GET" && path == "/logo.png") {
-                writeBinary(client.getOutputStream(), 200, "image/png", logoBytes)
+            if (requestParts[0] == "GET" && path == "/logo.jpeg") {
+                if (logoBytes.isEmpty()) {
+                    writeJson(writer, 404, errorJson("Logo is not available."))
+                } else {
+                    writeBinary(client.getOutputStream(), 200, "image/jpeg", logoBytes)
+                }
                 return
             }
 
