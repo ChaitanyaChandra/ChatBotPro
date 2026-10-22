@@ -2,8 +2,7 @@
 <!--
     Contact details shown in the in-app Privacy Policy and Terms of Use.
     Fill these in before building a release; release builds fail while any value is still TODO.
-    The postal address may stay empty in the free GitHub and F-Droid builds. The Google Play
-    build is published from the private repository, which sets the full address.
+    The postal address may stay empty for the free GitHub build.
 -->
 <resources>
     <string name="legal_developer_name" translatable="false">Chaitanya</string>

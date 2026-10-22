@@ -16,39 +16,37 @@ by Dinesh Soudagar (MIT licensed — see `NOTICE.md`).
 - Optional LAN web interface served from the phone
 - Bundled Terms of Use and Privacy Policy
 
-## Flavors
+## Distribution
 
-| Flavor | OCR implementation | Intended distribution |
-| --- | --- | --- |
-| `github` | Google ML Kit | GitHub Releases |
-| `play` | Google ML Kit | Google Play |
-| `fdroid` | Tesseract4Android | F-Droid / IzzyOnDroid |
+The app is distributed as a GitHub Release APK and uses Google ML Kit for
+on-device text recognition.
 
-The `fdroid` flavor intentionally contains no proprietary ML Kit classes.
+Build the release APK:
 
-Debug builds install side by side, with a channel suffix in the app label.
+```sh
+./gradlew :app:assembleGithubRelease
+```
 
-## Build
+For local testing, a debug build installs alongside the release under the
+application ID `org.chaitu.chatbotpro.debug`:
 
-Requirements:
+```sh
+./gradlew :app:assembleGithubDebug
+```
+
+## Requirements
 
 - JDK 17
 - Android SDK Platform 36
 - Android build-tools 36.0.0
 
-```sh
-./gradlew :app:assembleGithubDebug
-./gradlew :app:assembleFdroidDebug
-./gradlew :app:assemblePlayDebug
-```
-
 Unit tests:
 
 ```sh
-./gradlew :app:testGithubDebugUnitTest :app:testFdroidDebugUnitTest :app:testPlayDebugUnitTest
+./gradlew :app:testGithubDebugUnitTest
 ```
 
-Build outputs are written to `app/build/outputs/apk/<flavor>/debug/`.
+Build outputs are written to `app/build/outputs/apk/github/`.
 
 ## Toolchain
 

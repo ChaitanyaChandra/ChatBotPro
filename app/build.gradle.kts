@@ -32,34 +32,21 @@ android {
         manifestPlaceholders["appLabel"] = "ChatBotPro"
     }
 
-    // One codebase, three distribution channels:
-    // github = free APK on GitHub Releases, fdroid = F-Droid/IzzyOnDroid (no proprietary libraries),
-    // play = Google Play.
+    // Single distribution channel: free APK on GitHub Releases.
     flavorDimensions += "store"
     productFlavors {
         create("github") {
             dimension = "store"
             buildConfigField("String", "DISTRIBUTION_CHANNEL", "\"github\"")
         }
-        create("fdroid") {
-            dimension = "store"
-            buildConfigField("String", "DISTRIBUTION_CHANNEL", "\"fdroid\"")
-        }
-        create("play") {
-            dimension = "store"
-            buildConfigField("String", "DISTRIBUTION_CHANNEL", "\"play\"")
-        }
     }
 
-    // OCR: github and play share the Google ML Kit implementation in src/mlkit;
-    // fdroid uses the open-source Tesseract implementation in src/fdroid.
+    // OCR: the GitHub build uses the Google ML Kit implementation in src/mlkit.
     // Register the shared Kotlin OCR sources with both the Java and Kotlin source sets.
     sourceSets {
-        listOf("github", "play").forEach { flavor ->
-            getByName(flavor) {
-                java.srcDir("src/mlkit/java")
-                kotlin.srcDir("src/mlkit/java")
-            }
+        getByName("github") {
+            java.srcDir("src/mlkit/java")
+            kotlin.srcDir("src/mlkit/java")
         }
     }
 
@@ -92,12 +79,11 @@ android {
     }
 }
 
-// Debug builds of each channel install side by side so all three can be tested on one phone.
+// Keep debug builds separate from the release install.
 androidComponents {
     onVariants(selector().withBuildType("debug")) { variant ->
-        val channel = variant.flavorName ?: return@onVariants
-        variant.applicationId.set("org.chaitu.chatbotpro.debug.$channel")
-        variant.manifestPlaceholders.put("appLabel", "ChatBotPro ($channel)")
+        variant.applicationId.set("org.chaitu.chatbotpro.debug")
+        variant.manifestPlaceholders.put("appLabel", "ChatBotPro (debug)")
     }
 }
 
@@ -136,11 +122,7 @@ dependencies {
     implementation("androidx.camera:camera-camera2:1.4.2")
     implementation("androidx.camera:camera-lifecycle:1.4.2")
     implementation("androidx.camera:camera-view:1.4.2")
-    // Proprietary ML Kit stays out of the fdroid flavor.
     "githubImplementation"("com.google.mlkit:text-recognition:16.0.1")
-    "playImplementation"("com.google.mlkit:text-recognition:16.0.1")
-    // Tesseract OCR (Apache-2.0), JitPack-only; kept out of the Play/GitHub flavors.
-    "fdroidImplementation"("cz.adaptech.tesseract4android:tesseract4android:4.9.0")
     implementation("com.google.ai.edge.litertlm:litertlm-android:$liteRtLmVersion")
     implementation("com.tom-roush:pdfbox-android:2.0.27.0")
     implementation("androidx.work:work-runtime-ktx:2.11.2")

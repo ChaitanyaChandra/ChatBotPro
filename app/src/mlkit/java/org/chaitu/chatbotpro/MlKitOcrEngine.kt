@@ -12,7 +12,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
-/** GitHub and Play builds: Google ML Kit Latin text recognition (model bundled in the APK). */
+/** GitHub build: Google ML Kit Latin text recognition (model bundled in the APK). */
 @Suppress("UNUSED_PARAMETER")
 fun createOcrEngine(context: Context, statusListener: OcrStatusListener? = null): OcrEngine =
     MlKitOcrEngine(context)

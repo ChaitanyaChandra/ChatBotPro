@@ -33,5 +33,5 @@ SOFTWARE.
 ```
 
 Third-party components (LiteRT-LM, ONNX Runtime, sherpa-onnx, ML Kit,
-Tesseract4Android, PDFBox, Markwon, AndroidX, CameraX and others) and the
-downloaded AI models keep their own licenses.
+PDFBox, Markwon, AndroidX, CameraX and others) and the downloaded AI models
+keep their own licenses.
